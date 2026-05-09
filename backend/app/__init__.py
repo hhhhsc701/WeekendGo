@@ -1,0 +1,1 @@
+"""WeekendGo backend package."""

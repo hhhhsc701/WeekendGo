@@ -1,0 +1,69 @@
+mcp:
+  timeout_seconds: 30
+  servers:
+    amap:
+      enabled: true
+      region: domestic
+      command: npx
+      args:
+        - -y
+        - "@amap/amap-maps-mcp-server"
+      env:
+        AMAP_MAPS_API_KEY: ${AMAP_API_KEY}
+      tools:
+        - geocode
+        - search_poi
+        - search_poi_around
+        - driving_route_planning
+        - walking_route_planning
+        - public_transit_route_planning
+        - get_weather
+        - search_poi_detail
+
+    google-maps:
+      enabled: true
+      region: international
+      command: npx
+      args:
+        - -y
+        - "@cablate/mcp-google-map"
+      env:
+        GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY}
+      tools:
+        - geocode
+        - maps_search_nearby
+        - maps_plan_route
+
+    weather:
+      enabled: true
+      region: shared
+      command: npx
+      args:
+        - -y
+        - weather-mcp
+      env: {}
+      tools:
+        - search_location
+        - get_forecast
+
+    train-12306:
+      enabled: true
+      region: domestic
+      command: npx
+      args:
+        - -y
+        - 12306-mcp
+      env: {}
+      tools:
+        - query_trains
+
+  routes:
+    domestic:
+      primary: amap
+      shared:
+        - weather
+        - train-12306
+    international:
+      primary: google-maps
+      shared:
+        - weather
