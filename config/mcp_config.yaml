@@ -1,9 +1,21 @@
 mcp:
   timeout_seconds: 30
   servers:
-    amap:
+    # API模式：直接HTTP调用高德API（推荐生产环境）
+    amap-api:
       enabled: true
-      region: domestic
+      mode: api
+      api_url: https://restapi.amap.com/v3
+      api_key: ${AMAP_API_KEY}
+      tools:
+        - geocode
+        - search_poi
+        - get_weather
+
+    # Local模式：通过npx启动MCP Server（适合开发环境）
+    amap-mcp:
+      enabled: false  # 切换为true时使用Local模式
+      mode: local
       command: npx
       args:
         - -y
@@ -12,17 +24,24 @@ mcp:
         AMAP_MAPS_API_KEY: ${AMAP_API_KEY}
       tools:
         - geocode
-        - search_poi
         - search_poi_around
         - driving_route_planning
-        - walking_route_planning
-        - public_transit_route_planning
         - get_weather
-        - search_poi_detail
 
-    google-maps:
+    # Google Maps API模式
+    google-maps-api:
       enabled: true
-      region: international
+      mode: api
+      api_url: https://maps.googleapis.com/maps/api
+      api_key: ${GOOGLE_MAPS_API_KEY}
+      tools:
+        - geocode
+        - place/nearbysearch
+
+    # Google Maps Local模式
+    google-maps-mcp:
+      enabled: false
+      mode: local
       command: npx
       args:
         - -y
@@ -34,9 +53,10 @@ mcp:
         - maps_search_nearby
         - maps_plan_route
 
+    # Weather MCP（Local模式，封装便捷）
     weather:
       enabled: true
-      region: shared
+      mode: local
       command: npx
       args:
         - -y
@@ -46,9 +66,10 @@ mcp:
         - search_location
         - get_forecast
 
+    # 12306 MCP（Local模式，已封装查询逻辑）
     train-12306:
       enabled: true
-      region: domestic
+      mode: local
       command: npx
       args:
         - -y
@@ -57,13 +78,14 @@ mcp:
       tools:
         - query_trains
 
+  # 默认路由配置
   routes:
     domestic:
-      primary: amap
+      primary: amap-api
       shared:
         - weather
         - train-12306
     international:
-      primary: google-maps
+      primary: google-maps-api
       shared:
         - weather
