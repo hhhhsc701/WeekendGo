@@ -96,7 +96,13 @@ async def get_config(settings: Settings = Depends(get_settings)) -> dict[str, An
         "mcp": {
             "timeoutSeconds": config.timeout_seconds,
             "servers": [
-                {"name": name, "enabled": server.enabled, "region": server.region, "tools": server.tools}
+                {
+                    "name": name,
+                    "enabled": server.enabled,
+                    "region": server.region,
+                    "tools": server.tools,
+                    "unavailableReason": server.unavailable_reason,
+                }
                 for name, server in config.servers.items()
             ],
             "routes": {name: route.model_dump() for name, route in config.routes.items()},

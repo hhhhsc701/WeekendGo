@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
 
 
 async def verify(args: argparse.Namespace) -> dict[str, Any]:
-    config = load_mcp_config(Path(args.config), enabled_servers={args.server})
+    config = load_mcp_config(Path(args.config), enabled_servers={args.server}, strict_env=True)
     manager = MCPClientManager(config)
     await manager.initialize()
     try:

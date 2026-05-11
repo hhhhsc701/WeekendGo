@@ -11,6 +11,17 @@ from app.mcp.region import Region, RegionRouter
 
 logger = logging.getLogger(__name__)
 
+TOOL_ALIASES = {
+    "geocode": "maps_geo",
+    "search_poi": "maps_text_search",
+    "search_poi_around": "maps_around_search",
+    "driving_route_planning": "maps_direction_driving",
+    "walking_route_planning": "maps_direction_walking",
+    "public_transit_route_planning": "maps_direction_transit_integrated",
+    "get_weather": "maps_weather",
+    "search_poi_detail": "maps_search_detail",
+}
+
 
 class MCPClientManager:
     def __init__(self, config: MCPConfig, router: RegionRouter | None = None) -> None:
@@ -75,10 +86,11 @@ class MCPClientManager:
         session = self._sessions.get(server_name)
         if session is None:
             raise MCPToolError(f"MCP server {server_name} is not connected")
+        actual_tool_name = self._resolve_tool_name(server_name, tool_name)
 
         try:
             return await asyncio.wait_for(
-                session.call_tool(tool_name, params),
+                session.call_tool(actual_tool_name, params),
                 timeout=self.config.timeout_seconds,
             )
         except TimeoutError as exc:
@@ -105,3 +117,12 @@ class MCPClientManager:
         if candidates:
             raise MCPToolError(f"No connected MCP server available for tool {tool_name}")
         raise MCPToolError(f"MCP tool {tool_name} is not configured for region {region}")
+
+    def _resolve_tool_name(self, server_name: str, tool_name: str) -> str:
+        discovered = self._tool_registry.get(server_name, set())
+        if tool_name in discovered:
+            return tool_name
+        alias = TOOL_ALIASES.get(tool_name)
+        if alias and alias in discovered:
+            return alias
+        return tool_name

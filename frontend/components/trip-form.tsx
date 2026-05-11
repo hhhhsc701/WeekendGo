@@ -22,7 +22,7 @@ export function TripForm({
   onSubmit: (input: TripInput) => Promise<void> | void;
   loading?: boolean;
 }) {
-  const [city, setCity] = useState("Shanghai");
+  const [city, setCity] = useState("上海");
   const [date, setDate] = useState("");
   const [days, setDays] = useState(1);
   const [budget, setBudget] = useState("");
@@ -66,7 +66,7 @@ export function TripForm({
     <form className="grid gap-5 lg:grid-cols-[1fr_1fr]" onSubmit={handleSubmit}>
       <label className="space-y-2">
         <span className="text-sm font-medium text-slate-800">City</span>
-        <Input value={city} onChange={(event) => setCity(event.target.value)} placeholder="Shanghai" />
+        <Input value={city} onChange={(event) => setCity(event.target.value)} placeholder="上海" />
         {submitted && errors.city ? <FieldError text={errors.city} /> : null}
       </label>
 

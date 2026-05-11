@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.mcp.region import Region
 
@@ -55,6 +55,13 @@ class Place(BaseModel):
     category: str | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_place(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return {"name": value}
+        return value
+
 
 class WeatherSummary(BaseModel):
     summary: str = "Weather data unavailable"
@@ -62,11 +69,25 @@ class WeatherSummary(BaseModel):
     rain_probability: float | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_weather(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return {"summary": value}
+        return value
+
 
 class TransportationInfo(BaseModel):
     summary: str = "No cross-city transportation data"
     trains: list[dict[str, Any]] = Field(default_factory=list)
     raw: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_transportation(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return {"summary": value}
+        return value
 
 
 class TripItem(BaseModel):
@@ -77,6 +98,35 @@ class TripItem(BaseModel):
     estimated_cost: float | None = None
     transport: str | None = None
     notes: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_llm_item(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        item = dict(value)
+        time_value = item.get("time") or item.get("time_range") or item.get("timeslot")
+        if time_value and ("start_time" not in item or "end_time" not in item):
+            start_time, end_time = split_time_range(str(time_value))
+            item.setdefault("start_time", start_time)
+            item.setdefault("end_time", end_time)
+        item.setdefault("start_time", item.get("start") or item.get("begin") or "09:00")
+        item.setdefault("end_time", item.get("end") or item.get("finish") or item["start_time"])
+        item.setdefault(
+            "activity",
+            item.get("description")
+            or item.get("title")
+            or item.get("name")
+            or item.get("type")
+            or "Activity",
+        )
+        if "place" not in item:
+            item["place"] = item.get("location") or item.get("venue") or item.get("name") or "Unknown place"
+        if "estimated_cost" not in item:
+            item["estimated_cost"] = item.get("cost") or item.get("price") or item.get("budget")
+        if "transport" not in item:
+            item["transport"] = item.get("transportation") or item.get("traffic")
+        return item
 
 
 class TripOutput(BaseModel):
@@ -90,6 +140,26 @@ class TripOutput(BaseModel):
     transportation: TransportationInfo = Field(default_factory=TransportationInfo)
     notes: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_llm_output(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        output = dict(value)
+        if isinstance(output.get("notes"), str):
+            output["notes"] = [output["notes"]]
+        if "total_budget" not in output:
+            output["total_budget"] = output.get("total_cost") or output.get("budget")
+        return output
+
+
+def split_time_range(value: str) -> tuple[str, str]:
+    normalized = value.replace("—", "-").replace("–", "-").replace("至", "-").strip()
+    if "-" in normalized:
+        start, end = normalized.split("-", 1)
+        return start.strip(), end.strip()
+    return normalized, normalized
 
 
 class GenerationContext(BaseModel):

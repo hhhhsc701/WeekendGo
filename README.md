@@ -34,17 +34,25 @@ Fill `.env` with the required keys before running live MCP or LLM flows.
 Backend:
 
 ```bash
-uv run uvicorn app.main:app --app-dir backend --reload
+BACKEND_PORT=8000 scripts/run_backend.sh
 ```
 
 Frontend:
 
 ```bash
-cd frontend
-npm run dev
+FRONTEND_PORT=3000 scripts/run_frontend.sh
 ```
 
 Open `http://localhost:3000` for the frontend and `http://localhost:8000/docs` for the backend API docs.
+
+Custom ports can be set in `.env`:
+
+```bash
+BACKEND_PORT=8100
+FRONTEND_PORT=3100
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8100
+CORS_ORIGINS=http://localhost:3100
+```
 
 ## Configuration
 

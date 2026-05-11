@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from functools import lru_cache
 import os
 import re
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from app.mcp.errors import MCPConfigurationError
 
@@ -20,6 +21,11 @@ class MCPServerConfig(BaseModel):
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     tools: list[str] = Field(default_factory=list)
+    _unavailable_reason: str | None = PrivateAttr(default=None)
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        return self._unavailable_reason
 
 
 class MCPRouteConfig(BaseModel):
@@ -50,7 +56,7 @@ def inject_environment_placeholders(value: Any) -> Any:
 def _replace_env_placeholders(value: str) -> str:
     def replace(match: re.Match[str]) -> str:
         env_name = match.group(1)
-        env_value = os.getenv(env_name)
+        env_value = _get_env_value(env_name)
         if env_value is None or env_value == "":
             raise MCPConfigurationError(f"Environment variable {env_name} is required")
         return env_value
@@ -58,7 +64,31 @@ def _replace_env_placeholders(value: str) -> str:
     return ENV_PATTERN.sub(replace, value)
 
 
-def load_mcp_config(path: Path | str, enabled_servers: set[str] | None = None) -> MCPConfig:
+def _get_env_value(name: str) -> str | None:
+    return os.getenv(name) or _read_dotenv().get(name)
+
+
+@lru_cache
+def _read_dotenv() -> dict[str, str]:
+    env_path = Path(".env")
+    if not env_path.exists():
+        return {}
+    values: dict[str, str] = {}
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def load_mcp_config(
+    path: Path | str,
+    enabled_servers: set[str] | None = None,
+    *,
+    strict_env: bool = False,
+) -> MCPConfig:
     config_path = Path(path)
     if not config_path.exists():
         raise MCPConfigurationError(f"MCP config file not found: {config_path}")
@@ -73,9 +103,15 @@ def load_mcp_config(path: Path | str, enabled_servers: set[str] | None = None) -
     config = RootMCPConfig.model_validate(raw).mcp
     for server_name, server_config in config.servers.items():
         if server_config.enabled:
-            server_config.env = inject_environment_placeholders(server_config.env)
-            server_config.args = inject_environment_placeholders(server_config.args)
-            server_config.command = inject_environment_placeholders(server_config.command)
+            try:
+                server_config.env = inject_environment_placeholders(server_config.env)
+                server_config.args = inject_environment_placeholders(server_config.args)
+                server_config.command = inject_environment_placeholders(server_config.command)
+            except MCPConfigurationError as exc:
+                if strict_env:
+                    raise
+                server_config.enabled = False
+                server_config._unavailable_reason = str(exc)
     return config
 
 

@@ -11,6 +11,11 @@ WeekendGo reads runtime settings from environment variables and MCP routing from
 - `GOOGLE_MAPS_API_KEY`: required for international Google Maps data.
 - `DATABASE_PATH`: SQLite database path, defaults to `data/weekendgo.sqlite3`.
 - `MCP_CONFIG_PATH`: MCP config path, defaults to `config/mcp_config.yaml`.
+- `BACKEND_HOST` / `BACKEND_PORT`: backend bind host and port used by `scripts/run_backend.sh`.
+- `FRONTEND_HOST` / `FRONTEND_PORT`: frontend bind host and port used by `scripts/run_frontend.sh`.
+- `BACKEND_PUBLIC_HOST`: host used by `scripts/run_frontend.sh` when deriving `NEXT_PUBLIC_API_BASE_URL`.
+- `NEXT_PUBLIC_API_BASE_URL`: browser-visible backend URL, for example `http://localhost:8100`.
+- `CORS_ORIGINS`: comma-separated frontend origins allowed by FastAPI, for example `http://localhost:3000,http://localhost:3100`.
 
 ## MCP Config
 

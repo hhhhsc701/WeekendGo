@@ -10,8 +10,10 @@ WeekendGo is designed as two processes: a FastAPI backend and a Next.js frontend
 4. Start the API with:
 
 ```bash
-uv run uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8000
+BACKEND_PORT=8000 scripts/run_backend.sh
 ```
+
+Set `BACKEND_PORT` to use a different host port.
 
 ## Frontend
 
@@ -21,9 +23,10 @@ uv run uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port 8000
 ```bash
 cd frontend
 npm install
-npm run build
-npm run start
+FRONTEND_PORT=3000 npm run dev -- --hostname 0.0.0.0 --port "$FRONTEND_PORT"
 ```
+
+Set `NEXT_PUBLIC_API_BASE_URL` to the browser-visible backend URL, especially when `BACKEND_PORT` is customized.
 
 ## MCP Requirements
 
