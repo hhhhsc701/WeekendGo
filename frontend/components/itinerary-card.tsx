@@ -23,12 +23,17 @@ function formatDateRange(dateStr: string, days: number): string {
 
 function hasWeatherSummary(summary?: string | null): boolean {
   if (!summary) return false;
-  return !["不可用", "暂不可用", "无法获取"].some((text) => summary.includes(text));
+  const normalized = summary.trim();
+  if (!normalized) return false;
+  return !["不可用", "暂不可用", "无法获取", "unknown", "unavailable"].some((text) =>
+    normalized.toLowerCase().includes(text)
+  );
 }
 
 export function ItineraryCard({ trip, onDelete }: ItineraryCardProps) {
   const router = useRouter();
   const [deleting, setDeleting] = useState(false);
+  const weatherSummary = trip.weather_summary?.summary?.trim();
 
   const handleClick = () => {
     router.push(`/itinerary/${trip.id}`);
@@ -109,12 +114,12 @@ export function ItineraryCard({ trip, onDelete }: ItineraryCardProps) {
           </div>
         </div>
 
-        {hasWeatherSummary(trip.weather_summary.summary) && (
+        {hasWeatherSummary(weatherSummary) && (
           <div className="mt-4 pt-4 border-t border-border/50">
             <p className="text-sm text-muted">
               <span className="font-medium text-foreground">天气：</span>
-              {trip.weather_summary.summary}
-              {trip.weather_summary.temperature_c && (
+              {weatherSummary}
+              {trip.weather_summary?.temperature_c && (
                 <span className="ml-2">
                   {trip.weather_summary.temperature_c}°C
                 </span>

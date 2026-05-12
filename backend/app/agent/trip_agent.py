@@ -343,7 +343,7 @@ class TripAgent:
             data = json.loads(arguments)
             data["input"] = trip_input.model_dump(mode="json")
             data["region"] = self._region
-            if self._weather_summary and self._is_missing_weather(data.get("weather_summary")):
+            if self._weather_summary:
                 data["weather_summary"] = self._weather_summary
             elif self._is_missing_weather(data.get("weather_summary")):
                 data.pop("weather_summary", None)
@@ -436,11 +436,91 @@ class TripAgent:
         if weather or temperature:
             return self._build_weather_summary(result.get("city"), weather, temperature)
 
+        daily_summary = self._extract_daily_weather_summary(result)
+        if daily_summary:
+            return daily_summary
+
+        content_text = self._extract_content_text(result)
+        if content_text:
+            return self._build_weather_summary_from_text(content_text)
+
         text = result.get("text") or result.get("summary") or result.get("forecast")
         if isinstance(text, str) and text.strip():
-            return {"summary": text.strip()}
+            return self._build_weather_summary_from_text(text)
 
         return None
+
+    def _extract_daily_weather_summary(self, result: dict[str, Any]) -> dict[str, Any] | None:
+        daily = self._first_mapping(result.get("daily"))
+        if not daily:
+            return None
+
+        high = self._first_sequence_value(daily.get("temperature_2m_max"))
+        low = self._first_sequence_value(daily.get("temperature_2m_min"))
+        condition = self._first_sequence_value(daily.get("weather") or daily.get("condition"))
+        parts = []
+        if condition not in (None, ""):
+            parts.append(str(condition))
+        if high not in (None, "") and low not in (None, ""):
+            parts.append(f"{high}-{low}°C")
+        elif high not in (None, ""):
+            parts.append(f"{high}°C")
+        if not parts:
+            return None
+        return {"summary": "，".join(parts)}
+
+    def _extract_content_text(self, result: dict[str, Any]) -> str | None:
+        content = result.get("content")
+        if not isinstance(content, list):
+            return None
+
+        texts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                texts.append(item["text"])
+            elif hasattr(item, "text") and isinstance(item.text, str):
+                texts.append(item.text)
+        joined = "\n".join(text.strip() for text in texts if text.strip())
+        return joined or None
+
+    def _build_weather_summary_from_text(self, text: str) -> dict[str, Any] | None:
+        cleaned = text.strip()
+        if not cleaned:
+            return None
+
+        temperature = self._extract_markdown_field(cleaned, "Temperature")
+        conditions = self._extract_markdown_field(cleaned, "Conditions")
+        precipitation = self._extract_markdown_field(cleaned, "Precipitation Chance")
+
+        parts = [part for part in (conditions, temperature) if part]
+        if precipitation:
+            parts.append(f"降水概率 {precipitation}")
+        if parts:
+            return {"summary": "，".join(parts)}
+
+        first_content_line = next(
+            (
+                line.strip("#* -")
+                for line in cleaned.splitlines()
+                if line.strip() and not line.startswith("---")
+            ),
+            "",
+        )
+        if first_content_line:
+            return {"summary": first_content_line}
+        return None
+
+    def _extract_markdown_field(self, text: str, field_name: str) -> str | None:
+        pattern = rf"^\s*\*\*{re.escape(field_name)}:\*\*\s*(.+?)\s*$"
+        match = re.search(pattern, text, re.MULTILINE)
+        if not match:
+            return None
+        return match.group(1).strip()
+
+    def _first_sequence_value(self, value: Any) -> Any:
+        if isinstance(value, list) and value:
+            return value[0]
+        return value
 
     def _build_weather_summary(
         self,

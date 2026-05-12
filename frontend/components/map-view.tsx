@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Place } from "@/types/trip";
 
 interface MapViewProps {
@@ -9,91 +9,162 @@ interface MapViewProps {
 }
 
 const CHINA_CENTER = { lat: 35.8617, lng: 104.1954 };
+const X_PI = (Math.PI * 3000.0) / 180.0;
+const A = 6378245.0;
+const EE = 0.00669342162296594323;
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function hasValidCoordinates(place: Place): boolean {
+  return isFiniteNumber(place.coordinates?.lat) && isFiniteNumber(place.coordinates?.lng);
+}
+
+function isInChina(lat: number, lng: number): boolean {
+  return lng >= 72.004 && lng <= 137.8347 && lat >= 0.8293 && lat <= 55.8271;
+}
+
+function transformLat(x: number, y: number): number {
+  let ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x));
+  ret += ((20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0) / 3.0;
+  ret += ((20.0 * Math.sin(y * Math.PI) + 40.0 * Math.sin((y / 3.0) * Math.PI)) * 2.0) / 3.0;
+  ret += ((160.0 * Math.sin((y / 12.0) * Math.PI) + 320 * Math.sin((y * Math.PI) / 30.0)) * 2.0) / 3.0;
+  return ret;
+}
+
+function transformLng(x: number, y: number): number {
+  let ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x));
+  ret += ((20.0 * Math.sin(6.0 * x * Math.PI) + 20.0 * Math.sin(2.0 * x * Math.PI)) * 2.0) / 3.0;
+  ret += ((20.0 * Math.sin(x * Math.PI) + 40.0 * Math.sin((x / 3.0) * Math.PI)) * 2.0) / 3.0;
+  ret += ((150.0 * Math.sin((x / 12.0) * Math.PI) + 300.0 * Math.sin((x / 30.0) * Math.PI)) * 2.0) / 3.0;
+  return ret;
+}
+
+function gcj02ToWgs84(lat: number, lng: number): [number, number] {
+  if (!isInChina(lat, lng)) return [lat, lng];
+
+  let dLat = transformLat(lng - 105.0, lat - 35.0);
+  let dLng = transformLng(lng - 105.0, lat - 35.0);
+  const radLat = (lat / 180.0) * Math.PI;
+  let magic = Math.sin(radLat);
+  magic = 1 - EE * magic * magic;
+  const sqrtMagic = Math.sqrt(magic);
+  dLat = (dLat * 180.0) / (((A * (1 - EE)) / (magic * sqrtMagic)) * Math.PI);
+  dLng = (dLng * 180.0) / ((A / sqrtMagic) * Math.cos(radLat) * Math.PI);
+  return [lat * 2 - (lat + dLat), lng * 2 - (lng + dLng)];
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function toMapPoint(place: Place): { latLng: [number, number]; place: Place } | null {
+  const coordinates = place.coordinates;
+  if (
+    !isFiniteNumber(coordinates?.lat) ||
+    !isFiniteNumber(coordinates?.lng)
+  ) {
+    return null;
+  }
+
+  const { lat, lng } = coordinates;
+  return { latLng: gcj02ToWgs84(lat, lng), place };
+}
 
 function MapInner({ places, className }: MapViewProps) {
-  const [map, setMap] = useState<L.Map | null>(null);
-  const [markers, setMarkers] = useState<L.Marker[]>([]);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const markersRef = useRef<L.Layer[]>([]);
+  const mapPoints = useMemo(() => places.map(toMapPoint).filter((point) => point !== null), [places]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    let cancelled = false;
 
     import("leaflet").then((L) => {
-      if (!map) {
-        const mapInstance = L.map("map-container", {
-          center: [CHINA_CENTER.lat, CHINA_CENTER.lng],
-          zoom: 5,
-        });
+      if (cancelled || !containerRef.current || mapRef.current) return;
 
-        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-          attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-        }).addTo(mapInstance);
+      const map = L.map(containerRef.current, {
+        center: [CHINA_CENTER.lat, CHINA_CENTER.lng],
+        zoom: 5,
+        scrollWheelZoom: false,
+      });
 
-        setMap(mapInstance);
-      }
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      }).addTo(map);
+
+      mapRef.current = map;
+      window.setTimeout(() => map.invalidateSize(), 0);
     });
+
+    return () => {
+      cancelled = true;
+      markersRef.current.forEach((marker) => marker.remove());
+      markersRef.current = [];
+      mapRef.current?.remove();
+      mapRef.current = null;
+    };
   }, []);
 
   useEffect(() => {
-    if (!map || typeof window === "undefined") return;
+    let cancelled = false;
 
     import("leaflet").then((L) => {
-      markers.forEach((m) => m.remove());
+      if (cancelled || !mapRef.current) return;
 
-      const placesWithCoords = places.filter(
-        (p) => p.coordinates?.lat && p.coordinates?.lng
-      );
+      const map = mapRef.current;
+      markersRef.current.forEach((marker) => marker.remove());
+      markersRef.current = [];
 
-      if (placesWithCoords.length === 0) {
+      if (mapPoints.length === 0) {
         map.setView([CHINA_CENTER.lat, CHINA_CENTER.lng], 5);
-        setMarkers([]);
         return;
       }
 
-      const newMarkers: L.Marker[] = [];
-      const bounds: L.LatLngBoundsExpression = [];
-
-      placesWithCoords.forEach((place) => {
-        if (place.coordinates) {
-          const latLng: L.LatLngExpression = [
-            place.coordinates.lat,
-            place.coordinates.lng,
-          ];
-          bounds.push(latLng);
-
-          const marker = L.marker(latLng)
-            .bindPopup(`<strong>${place.name}</strong>${place.address ? `<br/><small>${place.address}</small>` : ""}`)
-            .addTo(map);
-
-          newMarkers.push(marker);
-        }
+      const bounds: L.LatLngExpression[] = [];
+      markersRef.current = mapPoints.map(({ latLng, place }) => {
+        bounds.push(latLng);
+        const address = place.address ? `<br/><small>${escapeHtml(place.address)}</small>` : "";
+        return L.circleMarker(latLng, {
+          radius: 7,
+          color: "#2563eb",
+          weight: 2,
+          fillColor: "#3b82f6",
+          fillOpacity: 0.85,
+        })
+          .bindPopup(`<strong>${escapeHtml(place.name)}</strong>${address}`)
+          .addTo(map);
       });
 
-      setMarkers(newMarkers);
-
-      if (bounds.length > 0) {
-        map.fitBounds(L.latLngBounds(bounds), { padding: [50, 50] });
-      }
+      map.fitBounds(L.latLngBounds(bounds), {
+        padding: [40, 40],
+        maxZoom: 14,
+      });
+      window.setTimeout(() => map.invalidateSize(), 0);
     });
-  }, [map, places]);
 
-  useEffect(() => {
     return () => {
-      if (map) {
-        map.remove();
-      }
+      cancelled = true;
     };
-  }, [map]);
+  }, [mapPoints]);
 
   return (
     <div
-      id="map-container"
-      className={`w-full h-[400px] rounded-lg border border-border ${className || ""}`}
+      ref={containerRef}
+      className={`w-full h-[400px] rounded-lg border border-border overflow-hidden ${className || ""}`}
     />
   );
 }
 
 export function MapView({ places, className }: MapViewProps) {
   const [mounted, setMounted] = useState(false);
+  const placesWithCoords = places.filter(hasValidCoordinates);
 
   useEffect(() => {
     setMounted(true);
@@ -109,10 +180,6 @@ export function MapView({ places, className }: MapViewProps) {
     );
   }
 
-  const placesWithCoords = places.filter(
-    (p) => p.coordinates?.lat && p.coordinates?.lng
-  );
-
   if (placesWithCoords.length === 0) {
     return (
       <div
@@ -123,5 +190,5 @@ export function MapView({ places, className }: MapViewProps) {
     );
   }
 
-  return <MapInner places={places} className={className} />;
+  return <MapInner places={placesWithCoords} className={className} />;
 }

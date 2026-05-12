@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.agent.trip_agent import TripAgent
-from app.models.trip import CompanionType, Place, TripInput, TripOutput
+from app.models.trip import CompanionType, Coordinates, Place, TripInput, TripOutput
 
 
 class FakeChatCompletion:
@@ -203,6 +203,21 @@ WEATHER_RESULT: dict[str, Any] = {
     "temperature": "18-25",
 }
 
+WEATHER_TEXT_RESULT: dict[str, Any] = {
+    "content": [
+        {
+            "type": "text",
+            "text": (
+                "# Weather Forecast (Daily)\n\n"
+                "## Tuesday, May 12\n"
+                "**Temperature:** High 25°C / Low 18°C\n"
+                "**Conditions:** Clear sky\n"
+                "**Precipitation Chance:** 10%\n"
+            ),
+        }
+    ]
+}
+
 LOCATION_RESULT: dict[str, Any] = {
     "text": "*Latitude: 39.9042, Longitude: 116.4074*",
 }
@@ -378,6 +393,33 @@ class TestTripAgentCompleteFlow:
 
         assert isinstance(result, TripOutput)
         assert fake_llm.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_weather_mcp_text_content_fills_missing_finish_weather(
+        self, trip_input: TripInput
+    ) -> None:
+        """Weather MCP text content is converted into a displayable weather summary."""
+        fake_mcp = FakeMCP(
+            tool_results={
+                "amap-mcp:geocode": GEOCODE_RESULT,
+                "weather:get_forecast": WEATHER_TEXT_RESULT,
+            }
+        )
+        output_without_weather = dict(SAMPLE_TRIP_OUTPUT)
+        output_without_weather["weather_summary"] = {"summary": "天气数据不可用"}
+        fake_llm = FakeLLM(
+            responses=[
+                {"tool_calls": [{"name": "geocode", "arguments": {"address": "北京"}}]},
+                {"tool_calls": [{"name": "get_weather", "arguments": {"city": "北京"}}]},
+                {"tool_calls": [{"name": "finish", "arguments": output_without_weather}]},
+            ]
+        )
+
+        agent = TripAgent(llm_client=fake_llm, mcp_manager=fake_mcp, max_iterations=10)
+        result = await agent.run(trip_input)
+
+        assert isinstance(result, TripOutput)
+        assert result.weather_summary.summary == "Clear sky，High 25°C / Low 18°C，降水概率 10%"
 
 
 class TestTripAgentFallback:
@@ -633,3 +675,48 @@ class TestPlaceCoercion:
         assert result.name == "故宫博物院"
         assert result.coordinates is not None
         assert result.coordinates.lat == 39.9
+
+    def test_coordinate_string_coercion(self) -> None:
+        """AMap lng,lat coordinate strings are converted to Coordinates."""
+        result = Coordinates.model_validate("114.4258,30.6076")
+
+        assert result.lng == 114.4258
+        assert result.lat == 30.6076
+
+    def test_place_location_string_coerces_to_coordinates(self) -> None:
+        """Place.location from POI data is reused as coordinates when needed."""
+        result = Place.model_validate({"name": "东湖", "location": "114.4258,30.6076"})
+
+        assert result.coordinates is not None
+        assert result.coordinates.lng == 114.4258
+        assert result.coordinates.lat == 30.6076
+
+    def test_trip_output_accepts_coordinate_strings(self) -> None:
+        """LLM finish output can include coordinates as AMap lng,lat strings."""
+        data = {
+            "title": "武汉周末游",
+            "input": {
+                "city": "武汉",
+                "date": "2026-05-16",
+                "days": 1,
+                "interests": ["美食"],
+                "companions": "solo",
+            },
+            "items": [
+                {
+                    "start_time": "09:00",
+                    "end_time": "11:00",
+                    "activity": "东湖游览",
+                    "place": {
+                        "name": "东湖",
+                        "coordinates": "114.4258,30.6076",
+                    },
+                }
+            ],
+        }
+
+        result = TripOutput.model_validate(data)
+
+        assert result.items[0].place.coordinates is not None
+        assert result.items[0].place.coordinates.lng == 114.4258
+        assert result.items[0].place.coordinates.lat == 30.6076

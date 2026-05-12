@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
 
@@ -101,3 +102,19 @@ async def test_call_reports_initialization_failure_reason() -> None:
     assert "MCP server amap-mcp not connected" in message
     assert "npx package download failed" in message
     assert "`amap`" in message
+
+
+def test_parse_mcp_result_accepts_dict_text_content() -> None:
+    manager = MCPClientManager(build_config())
+    result = SimpleNamespace(
+        content=[
+            {
+                "type": "text",
+                "text": "# Weather Forecast\n\n**Temperature:** High 25°C / Low 18°C\n",
+            }
+        ]
+    )
+
+    parsed = manager._parse_mcp_result(result)
+
+    assert parsed == {"text": "# Weather Forecast\n\n**Temperature:** High 25°C / Low 18°C\n"}

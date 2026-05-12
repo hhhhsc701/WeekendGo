@@ -16,7 +16,21 @@ function formatDate(dateStr: string): string {
 
 function hasWeatherSummary(summary?: string | null): boolean {
   if (!summary) return false;
-  return !["不可用", "暂不可用", "无法获取"].some((text) => summary.includes(text));
+  const normalized = summary.trim();
+  if (!normalized) return false;
+  return !["不可用", "暂不可用", "无法获取", "unknown", "unavailable"].some((text) =>
+    normalized.toLowerCase().includes(text)
+  );
+}
+
+function hasCoordinates(item: TripOutput["items"][number]): boolean {
+  const coordinates = item.place.coordinates;
+  return (
+    typeof coordinates?.lat === "number" &&
+    Number.isFinite(coordinates.lat) &&
+    typeof coordinates?.lng === "number" &&
+    Number.isFinite(coordinates.lng)
+  );
 }
 
 function Skeleton() {
@@ -121,9 +135,8 @@ export default function ItineraryDetailPage() {
     );
   }
 
-  const placesWithCoords = trip.items
-    .filter((item) => item.place.coordinates?.lat && item.place.coordinates?.lng)
-    .map((item) => item.place);
+  const weatherSummary = trip.weather_summary?.summary?.trim();
+  const placesWithCoords = trip.items.filter(hasCoordinates).map((item) => item.place);
 
   return (
     <main className="min-h-screen bg-background">
@@ -175,15 +188,15 @@ export default function ItineraryDetailPage() {
             )}
           </div>
 
-          {hasWeatherSummary(trip.weather_summary.summary) && (
+          {hasWeatherSummary(weatherSummary) && (
             <div className="mt-4 p-4 rounded-lg bg-primary/5 border border-primary/20">
               <div className="flex items-center gap-2">
                 <Cloud className="w-5 h-5 text-primary" />
                 <span className="font-medium text-foreground">天气概况</span>
               </div>
               <p className="mt-2 text-sm text-muted">
-                {trip.weather_summary.summary}
-                {trip.weather_summary.temperature_c && (
+                {weatherSummary}
+                {trip.weather_summary?.temperature_c && (
                   <span className="ml-2 font-medium text-foreground">
                     {trip.weather_summary.temperature_c}°C
                   </span>

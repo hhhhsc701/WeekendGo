@@ -19,6 +19,27 @@ class Coordinates(BaseModel):
     lat: float
     lng: float
 
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_coordinates(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.split(",")]
+            if len(parts) >= 2:
+                return {"lng": parts[0], "lat": parts[1]}
+        if isinstance(value, (list, tuple)) and len(value) >= 2:
+            return {"lng": value[0], "lat": value[1]}
+        if isinstance(value, dict):
+            coordinates = dict(value)
+            if "lat" not in coordinates and "latitude" in coordinates:
+                coordinates["lat"] = coordinates["latitude"]
+            if "lng" not in coordinates:
+                if "longitude" in coordinates:
+                    coordinates["lng"] = coordinates["longitude"]
+                elif "lon" in coordinates:
+                    coordinates["lng"] = coordinates["lon"]
+            return coordinates
+        return value
+
 
 class Place(BaseModel):
     name: str
@@ -32,6 +53,12 @@ class Place(BaseModel):
     def coerce_place(cls, value: Any) -> Any:
         if isinstance(value, str):
             return {"name": value}
+        if isinstance(value, dict):
+            place = dict(value)
+            coordinates = place.get("coordinates")
+            if coordinates is None and isinstance(place.get("location"), str):
+                place["coordinates"] = place["location"]
+            return place
         return value
 
 

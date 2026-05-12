@@ -121,9 +121,23 @@ class MCPClientManager:
                             return json.loads(item.text)
                         except json.JSONDecodeError:
                             return {"text": item.text}
+                    if isinstance(item, dict) and isinstance(item.get("text"), str):
+                        try:
+                            return json.loads(item["text"])
+                        except json.JSONDecodeError:
+                            return {"text": item["text"]}
             if isinstance(content, str):
                 try:
                     return json.loads(content)
                 except json.JSONDecodeError:
                     return {"text": content}
+        if isinstance(result, dict):
+            content = result.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and isinstance(item.get("text"), str):
+                        try:
+                            return json.loads(item["text"])
+                        except json.JSONDecodeError:
+                            return {"text": item["text"]}
         return {"result": str(result)}
