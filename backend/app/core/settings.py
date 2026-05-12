@@ -18,8 +18,8 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_base_url: str | None = Field(default=None, alias="OPENAI_BASE_URL")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
-    openai_timeout_seconds: float = Field(default=120.0, alias="OPENAI_TIMEOUT_SECONDS")
-    generation_timeout_seconds: float = Field(default=150.0, alias="GENERATION_TIMEOUT_SECONDS")
+    openai_timeout_seconds: float = Field(default=300.0, alias="OPENAI_TIMEOUT_SECONDS")
+    generation_timeout_seconds: float = Field(default=300.0, alias="GENERATION_TIMEOUT_SECONDS")
     cors_origins_raw: str = Field(default="http://localhost:3000", alias="CORS_ORIGINS")
 
     @property

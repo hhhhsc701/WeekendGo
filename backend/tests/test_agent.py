@@ -81,13 +81,14 @@ class FakeMCP:
         self.tool_results = tool_results or {}
         self.errors = errors or {}
         self.call_count = 0
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
         self.config = MCPConfig(
             servers={
                 "amap-mcp": MCPServerConfig(
                     enabled=True,
                     mode="local",
-                    tools=["geocode", "search_poi_around", "get_weather"],
+                    tools=["geocode", "search_poi_around"],
                 ),
                 "google-maps-mcp": MCPServerConfig(
                     enabled=True,
@@ -97,7 +98,7 @@ class FakeMCP:
                 "weather": MCPServerConfig(
                     enabled=True,
                     mode="local",
-                    tools=["get_forecast"],
+                    tools=["search_location", "get_forecast"],
                 ),
                 "train-12306": MCPServerConfig(
                     enabled=True,
@@ -123,6 +124,7 @@ class FakeMCP:
         """Return pre-configured result or simulate error."""
         key = f"{server_name}:{tool_name}"
         self.call_count += 1
+        self.calls.append((server_name, tool_name, params))
 
         if key in self.errors:
             raise RuntimeError(self.errors[key])
@@ -201,6 +203,10 @@ WEATHER_RESULT: dict[str, Any] = {
     "temperature": "18-25",
 }
 
+LOCATION_RESULT: dict[str, Any] = {
+    "text": "*Latitude: 39.9042, Longitude: 116.4074*",
+}
+
 
 @pytest.fixture
 def trip_input() -> TripInput:
@@ -223,7 +229,8 @@ def fake_mcp() -> FakeMCP:
         tool_results={
             "amap-mcp:geocode": GEOCODE_RESULT,
             "amap-mcp:search_poi_around": SEARCH_POI_RESULT,
-            "amap-mcp:get_weather": WEATHER_RESULT,
+            "weather:search_location": LOCATION_RESULT,
+            "weather:get_forecast": WEATHER_RESULT,
         }
     )
 
@@ -291,6 +298,86 @@ class TestTripAgentCompleteFlow:
 
         assert isinstance(result, TripOutput)
         assert result.weather_summary.summary == "北京，晴，18-25°C"
+
+    @pytest.mark.asyncio
+    async def test_weather_reuses_geocode_coordinates(
+        self, trip_input: TripInput, fake_mcp: FakeMCP
+    ) -> None:
+        """Weather forecast uses cached geocode coordinates instead of search_location."""
+        output_without_weather = dict(SAMPLE_TRIP_OUTPUT)
+        output_without_weather["weather_summary"] = {"summary": "天气数据不可用"}
+        fake_llm = FakeLLM(
+            responses=[
+                {"tool_calls": [{"name": "geocode", "arguments": {"address": "北京"}}]},
+                {"tool_calls": [{"name": "get_weather", "arguments": {"city": "北京"}}]},
+                {"tool_calls": [{"name": "finish", "arguments": output_without_weather}]},
+            ]
+        )
+
+        agent = TripAgent(llm_client=fake_llm, mcp_manager=fake_mcp, max_iterations=10)
+        result = await agent.run(trip_input)
+
+        assert isinstance(result, TripOutput)
+        assert ("weather", "search_location") not in [
+            (server_name, tool_name) for server_name, tool_name, _ in fake_mcp.calls
+        ]
+        assert (
+            "weather",
+            "get_forecast",
+            {"latitude": 39.9163, "longitude": 116.3972, "days": 3},
+        ) in fake_mcp.calls
+
+    @pytest.mark.asyncio
+    async def test_chinese_weather_does_not_fallback_to_weather_location_search(
+        self, trip_input: TripInput
+    ) -> None:
+        """Chinese city weather resolution never calls weather.search_location."""
+        fake_mcp = FakeMCP(
+            tool_results={
+                "amap-mcp:geocode": {"error": "No geocode result"},
+                "weather:search_location": LOCATION_RESULT,
+                "weather:get_forecast": WEATHER_RESULT,
+            }
+        )
+        output_without_weather = dict(SAMPLE_TRIP_OUTPUT)
+        output_without_weather["weather_summary"] = {"summary": "天气数据不可用"}
+        fake_llm = FakeLLM(
+            responses=[
+                {"tool_calls": [{"name": "get_weather", "arguments": {"city": "北京"}}]},
+                {"tool_calls": [{"name": "finish", "arguments": output_without_weather}]},
+            ]
+        )
+
+        agent = TripAgent(llm_client=fake_llm, mcp_manager=fake_mcp, max_iterations=10)
+        result = await agent.run(trip_input)
+
+        assert isinstance(result, TripOutput)
+        assert ("weather", "search_location") not in [
+            (server_name, tool_name) for server_name, tool_name, _ in fake_mcp.calls
+        ]
+        assert ("weather", "get_forecast") not in [
+            (server_name, tool_name) for server_name, tool_name, _ in fake_mcp.calls
+        ]
+
+    @pytest.mark.asyncio
+    async def test_weather_forecast_failure_continues_to_finish(
+        self, trip_input: TripInput, fake_mcp: FakeMCP
+    ) -> None:
+        """Forecast failures are returned as tool errors instead of aborting generation."""
+        fake_mcp.errors["weather:get_forecast"] = "OpenMeteo API is currently unavailable"
+        fake_llm = FakeLLM(
+            responses=[
+                {"tool_calls": [{"name": "geocode", "arguments": {"address": "北京"}}]},
+                {"tool_calls": [{"name": "get_weather", "arguments": {"city": "北京"}}]},
+                {"tool_calls": [{"name": "finish", "arguments": SAMPLE_TRIP_OUTPUT}]},
+            ]
+        )
+
+        agent = TripAgent(llm_client=fake_llm, mcp_manager=fake_mcp, max_iterations=10)
+        result = await agent.run(trip_input)
+
+        assert isinstance(result, TripOutput)
+        assert fake_llm.call_count == 3
 
 
 class TestTripAgentFallback:
@@ -364,7 +451,7 @@ class TestTripAgentToolFailure:
             errors={
                 "amap-mcp:geocode": "Service unavailable",
                 "amap-mcp:search_poi_around": "Service unavailable",
-                "amap-mcp:get_weather": "Service unavailable",
+                "weather:get_forecast": "Service unavailable",
             },
         )
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -32,6 +33,7 @@ class TripAgent:
         self._region = self._detect_region(trip_input.city)
         self._route = self._get_route()
         self._weather_summary: dict[str, Any] | None = None
+        self._city_coordinates: dict[str, float] | None = None
         self._tool_errors: list[str] = []
         logger.info(
             "Detected region: %s, route: primary=%s, shared=%s",
@@ -139,6 +141,9 @@ class TripAgent:
 
                 api_tool = self._resolve_mcp_tool_name(server_name, "geocode")
                 result = await self.mcp.call(server_name, api_tool, params)
+                coordinates = self._extract_coordinates(result)
+                if coordinates:
+                    self._city_coordinates = coordinates
                 return json.dumps(result, ensure_ascii=False)
 
             if tool_name == "search_poi":
@@ -154,11 +159,7 @@ class TripAgent:
                 return json.dumps(result, ensure_ascii=False)
 
             if tool_name == "get_weather":
-                server_name = self._resolve_server_for_tool("get_weather")
-                if not server_name:
-                    return json.dumps({"error": "No weather service available"}, ensure_ascii=False)
-                api_tool = self._resolve_mcp_tool_name(server_name, "get_weather")
-                result = await self.mcp.call(server_name, api_tool, params)
+                result = await self._execute_weather_tool(params)
                 weather_summary = self._extract_weather_summary(result)
                 if weather_summary:
                     self._weather_summary = weather_summary
@@ -223,6 +224,114 @@ class TripAgent:
                 return candidate
         return logical_tool_name
 
+    async def _execute_weather_tool(self, params: dict[str, Any]) -> dict[str, Any]:
+        server_name = self._resolve_server_for_tool("get_weather")
+        if not server_name:
+            return {"error": "No weather service available"}
+
+        forecast_tool = self._resolve_mcp_tool_name(server_name, "get_weather")
+        latitude = params.get("latitude")
+        longitude = params.get("longitude")
+
+        if (latitude is None or longitude is None) and self._city_coordinates:
+            latitude = self._city_coordinates["latitude"]
+            longitude = self._city_coordinates["longitude"]
+
+        if latitude is None or longitude is None:
+            city = params.get("city") or params.get("query") or params.get("location")
+            if not city:
+                return {"error": "Weather query requires city or coordinates"}
+
+            location_result = await self._resolve_weather_location(str(city), server_name)
+            coordinates = self._extract_coordinates(location_result)
+            if coordinates is None:
+                return {
+                    "error": "Failed to resolve weather location coordinates",
+                    "location_result": location_result,
+                }
+            latitude = coordinates["latitude"]
+            longitude = coordinates["longitude"]
+
+        forecast_params = {
+            "latitude": float(latitude),
+            "longitude": float(longitude),
+            "days": max(1, min(int(params.get("days") or 3), 7)),
+        }
+        try:
+            return await self.mcp.call(server_name, forecast_tool, forecast_params)
+        except Exception as exc:
+            return {
+                "error": "Weather forecast unavailable",
+                "detail": str(exc),
+                "coordinates": {"latitude": forecast_params["latitude"], "longitude": forecast_params["longitude"]},
+            }
+
+    def _extract_coordinates(self, result: dict[str, Any]) -> dict[str, float] | None:
+        latitude = result.get("latitude") or result.get("lat")
+        longitude = result.get("longitude") or result.get("lng") or result.get("lon")
+        if (latitude is None or longitude is None) and isinstance(result.get("location"), str):
+            parts = [part.strip() for part in result["location"].split(",")]
+            if len(parts) >= 2:
+                longitude, latitude = parts[0], parts[1]
+        if (latitude is None or longitude is None) and isinstance(result.get("geocodes"), list):
+            for geocode in result["geocodes"]:
+                if isinstance(geocode, dict):
+                    coordinates = self._extract_coordinates(geocode)
+                    if coordinates:
+                        return coordinates
+        if latitude is not None and longitude is not None:
+            try:
+                return {"latitude": float(latitude), "longitude": float(longitude)}
+            except (TypeError, ValueError):
+                return None
+
+        text = result.get("text")
+        if isinstance(text, str):
+            match = re.search(
+                r"Latitude:\s*(-?\d+(?:\.\d+)?),\s*Longitude:\s*(-?\d+(?:\.\d+)?)",
+                text,
+                re.IGNORECASE,
+            )
+            if match is None:
+                match = re.search(
+                    r"Coordinates:\s*(-?\d+(?:\.\d+)?)°?,\s*(-?\d+(?:\.\d+)?)°?",
+                    text,
+                    re.IGNORECASE,
+                )
+            if match:
+                return {"latitude": float(match.group(1)), "longitude": float(match.group(2))}
+
+        return None
+
+    async def _resolve_weather_location(self, city: str, weather_server_name: str) -> dict[str, Any]:
+        if self._is_chinese(city):
+            geocode_server_name = self._resolve_server_for_tool("geocode")
+            if geocode_server_name:
+                geocode_tool = self._resolve_mcp_tool_name(geocode_server_name, "geocode")
+                geocode_result = await self.mcp.call(
+                    geocode_server_name,
+                    geocode_tool,
+                    {"address": city},
+                )
+                coordinates = self._extract_coordinates(geocode_result)
+                if coordinates:
+                    self._city_coordinates = coordinates
+                    return coordinates
+                return {
+                    "error": f"Failed to resolve Chinese city coordinates: {city}",
+                    "geocode_result": geocode_result,
+                }
+
+            return {
+                "error": f"No geocode service available for Chinese city: {city}",
+            }
+
+        return await self.mcp.call(
+            weather_server_name,
+            "search_location",
+            {"query": city, "limit": 1},
+        )
+
     def _is_chinese(self, text: str) -> bool:
         for char in text:
             if "\u4e00" <= char <= "\u9fff":
@@ -236,6 +345,8 @@ class TripAgent:
             data["region"] = self._region
             if self._weather_summary and self._is_missing_weather(data.get("weather_summary")):
                 data["weather_summary"] = self._weather_summary
+            elif self._is_missing_weather(data.get("weather_summary")):
+                data.pop("weather_summary", None)
             if self._tool_errors:
                 notes = data.get("notes") or []
                 if isinstance(notes, str):

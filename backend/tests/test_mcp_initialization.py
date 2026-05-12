@@ -18,7 +18,7 @@ def build_config() -> MCPConfig:
                 enabled=True,
                 mode="local",
                 command="amap",
-                tools=["geocode", "search_poi_around", "get_weather"],
+                tools=["geocode", "search_poi_around"],
             ),
             "google-maps-mcp": MCPServerConfig(
                 enabled=True,
@@ -30,7 +30,7 @@ def build_config() -> MCPConfig:
                 enabled=True,
                 mode="local",
                 command="weather",
-                tools=["get_weather"],
+                tools=["search_location", "get_forecast"],
             ),
             "train-12306": MCPServerConfig(
                 enabled=True,
@@ -60,7 +60,7 @@ def build_input(city: str, departure_city: str | None = None) -> TripInput:
 def test_domestic_trip_without_departure_skips_local_shared_servers() -> None:
     required = resolve_required_servers(build_config(), build_input("杭州"))
 
-    assert required == {"amap-mcp"}
+    assert required == {"amap-mcp", "weather"}
 
 
 def test_international_trip_uses_google_and_weather_servers() -> None:

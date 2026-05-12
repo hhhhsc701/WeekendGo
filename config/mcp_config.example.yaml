@@ -14,7 +14,6 @@ mcp:
         - geocode
         - search_poi_around
         - driving_route_planning
-        - get_weather
 
     google-maps-mcp:
       enabled: true
@@ -34,6 +33,7 @@ mcp:
     weather:
       enabled: true
       mode: local
+      timeout_seconds: 8
       command: npx
       args:
         - -y
