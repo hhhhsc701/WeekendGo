@@ -1,14 +1,35 @@
 # WeekendGo
 
-WeekendGo is an AI weekend itinerary assistant. It accepts city, date, budget, interests, companions, and optional departure-city context, then coordinates MCP tools and an LLM to produce a structured itinerary.
+WeekendGo is an AI weekend itinerary assistant using a **ReAct Agent architecture**. The LLM autonomously decides city type (domestic/international), selects MCP tools, and generates structured TripOutput through iterative Think→Act→Observe cycles.
 
 ## Architecture
 
-- `backend/`: FastAPI service, MCP integration, LLM orchestration, and SQLite persistence.
-- `frontend/`: Next.js App Router frontend.
-- `config/mcp_config.yaml`: MCP server routing configuration.
-- `data/`: local SQLite database directory.
-- `openspec/`: OpenSpec change artifacts and task tracking.
+### ReAct Agent Flow
+
+```
+User Input → TripAgent
+    ↓
+[Think] LLM analyzes city, plans tool usage
+    ↓
+[Act] Call MCP tools (geocode, search_poi, get_weather, query_trains)
+    ↓
+[Observe] Process tool results
+    ↓
+[Loop] Continue until finish tool called or max_iterations
+    ↓
+TripOutput → SQLite → Frontend Display
+```
+
+### Project Structure
+
+- `backend/app/agent/`: TripAgent with ReAct loop, TOOL_DEFINITIONS
+- `backend/app/mcp/`: MCPClientManager with dual-mode (API + Local MCP Server)
+- `backend/app/models/`: Pydantic models with LLM output coercion
+- `backend/app/api/`: FastAPI REST endpoints
+- `backend/app/db/`: SQLite persistence with TripRepository
+- `frontend/`: Next.js 15 App Router with Tailwind + Leaflet
+- `config/mcp_config.yaml`: MCP server routing (AMap, Google Maps, Weather, 12306)
+- `data/`: SQLite database directory
 
 ## Prerequisites
 
@@ -58,4 +79,47 @@ CORS_ORIGINS=http://localhost:3100
 
 MCP tools are configured in `config/mcp_config.yaml`. Values like `${AMAP_API_KEY}` are resolved from the process environment or `.env` loader before MCP servers are initialized.
 
+### MCP Dual-Mode
+
+- **API mode**: Direct HTTP calls to service APIs (AMap API, Google Maps API) - faster, production-ready
+- **Local mode**: MCP Server process via `npx` (Weather MCP, 12306 MCP) - dev/testing
+
 Domestic city routes use AMap and optional 12306. International routes use Google Maps and Weather MCP.
+
+### Agent Tools
+
+| Tool | Description | MCP Server |
+|------|-------------|------------|
+| `geocode` | City → coordinates | AMap (domestic) / Google Maps (international) |
+| `search_poi` | Find attractions, restaurants | AMap / Google Maps |
+| `get_weather` | Weather forecast | Weather MCP |
+| `query_trains` | Train schedules | 12306 MCP |
+| `finish` | Complete with TripOutput | LLM internal |
+
+## API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/trips/generate` | POST | Generate trip itinerary (TripInput → TripOutput) |
+| `/api/trips/{id}` | GET | Get trip by ID |
+| `/api/trips` | GET | List all trips |
+| `/api/trips/{id}` | DELETE | Delete trip |
+| `/api/config` | GET | Get runtime config |
+
+Full API docs: http://localhost:8000/docs
+
+## Testing
+
+```bash
+# Run TripAgent tests (14 tests with mock LLM/MCP)
+uv run pytest backend/tests/test_agent.py -v
+
+# Run all tests
+uv run pytest backend/tests -v
+```
+
+Test coverage includes:
+- Agent complete flow (geocode→poi→finish)
+- Agent timeout scenarios
+- Tool failure degradation
+- LLM output coercion

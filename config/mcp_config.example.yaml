@@ -1,11 +1,13 @@
 mcp:
   timeout_seconds: 30
   servers:
-    amap:
+    amap-mcp:
       enabled: true
-      region: domestic
+      mode: local
       command: npx
-      args: ["-y", "@amap/amap-maps-mcp-server"]
+      args:
+        - -y
+        - "@amap/amap-maps-mcp-server"
       env:
         AMAP_MAPS_API_KEY: ${AMAP_API_KEY}
       tools:
@@ -13,38 +15,55 @@ mcp:
         - search_poi_around
         - driving_route_planning
         - get_weather
-    google-maps:
+
+    google-maps-mcp:
       enabled: true
-      region: international
+      mode: local
       command: npx
-      args: ["-y", "@cablate/mcp-google-map"]
+      args:
+        - -y
+        - "@cablate/mcp-google-map"
       env:
-        GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY}
+        GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-}  # 可选
       tools:
         - geocode
         - maps_search_nearby
         - maps_plan_route
+
+    # Weather MCP（Local模式，使用官方 NOAA + Open-Meteo）
     weather:
       enabled: true
-      region: shared
+      mode: local
       command: npx
-      args: ["-y", "weather-mcp"]
-      env: {}
+      args:
+        - -y
+        - "@dangahagan/weather-mcp@latest"
+      env:
+        ENABLED_TOOLS: full
       tools:
         - search_location
         - get_forecast
+
+    # 12306 MCP（Local模式，已封装查询逻辑）
     train-12306:
       enabled: true
-      region: domestic
+      mode: local
       command: npx
-      args: ["-y", "12306-mcp"]
+      args:
+        - -y
+        - 12306-mcp
       env: {}
       tools:
         - query_trains
+
+  # 默认路由配置
   routes:
     domestic:
-      primary: amap
-      shared: [weather, train-12306]
+      primary: amap-mcp
+      shared:
+        - weather
+        - train-12306
     international:
-      primary: google-maps
-      shared: [weather]
+      primary: google-maps-mcp
+      shared:
+        - weather
