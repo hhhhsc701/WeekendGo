@@ -4,7 +4,8 @@ import asyncio
 import json
 import logging
 from collections.abc import Iterable
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
+from time import perf_counter
 from typing import Any
 
 from app.mcp.errors import MCPError, MCPTimeoutError, MCPToolError
@@ -14,9 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 class MCPClientManager:
-    def __init__(self, config: MCPConfig) -> None:
+    def __init__(self, config: MCPConfig, job_id: str | None = None) -> None:
         self.config = config
-        self._exit_stack = AsyncExitStack()
+        self.job_id = job_id or "local"
+        self._exit_stacks: dict[str, AsyncExitStack] = {}
         self._sessions: dict[str, Any] = {}
         self._init_errors: dict[str, str] = {}
 
@@ -27,28 +29,132 @@ class MCPClientManager:
             if selected_servers is not None and server_name not in selected_servers:
                 continue
             if not server_config.enabled:
+                logger.info("trip_generation[%s] MCP server skipped server=%s disabled", self.job_id, server_name)
                 continue
-            try:
-                await asyncio.wait_for(
-                    self._connect_local_server(server_name, server_config),
-                    timeout=min(server_config.timeout_seconds, 8.0),
-                )
-            except Exception as exc:
-                logger.exception("MCP server %s failed to initialize", server_name)
-                self._sessions[server_name] = None
-                self._init_errors[server_name] = self._format_init_error(server_config, exc)
+            await self._initialize_server_with_retries(server_name, server_config)
 
     async def close(self) -> None:
-        await self._exit_stack.aclose()
+        logger.info("trip_generation[%s] MCP manager close started", self.job_id)
+        for server_name in list(self._exit_stacks):
+            await self._disconnect_server(server_name)
         self._sessions.clear()
         self._init_errors.clear()
+        logger.info("trip_generation[%s] MCP manager close finished", self.job_id)
 
     async def call(self, server_name: str, tool: str, params: dict[str, Any]) -> dict[str, Any]:
         server = self.config.servers.get(server_name)
         if not server:
             raise MCPToolError(f"Server {server_name} not found")
 
-        return await self._call_local(server_name, server, tool, params)
+        last_error: Exception | None = None
+        attempts = max(1, server.retry_attempts)
+        for attempt in range(1, attempts + 1):
+            try:
+                logger.info(
+                    "trip_generation[%s] MCP tool call attempt %d/%d server=%s tool=%s params=%s",
+                    self.job_id,
+                    attempt,
+                    attempts,
+                    server_name,
+                    tool,
+                    self._json_preview(params),
+                )
+                if self._sessions.get(server_name) is None:
+                    await self._initialize_server_with_retries(server_name, server)
+                return await self._call_local(server_name, server, tool, params)
+            except MCPTimeoutError as exc:
+                last_error = exc
+                logger.warning(
+                    "MCP tool %s:%s timed out on attempt %d/%d",
+                    server_name,
+                    tool,
+                    attempt,
+                    attempts,
+                )
+                await self._disconnect_server(server_name)
+            except MCPToolError as exc:
+                last_error = exc
+                if not self._is_retryable_tool_error(exc):
+                    raise
+                logger.warning(
+                    "MCP tool %s:%s failed on attempt %d/%d: %s",
+                    server_name,
+                    tool,
+                    attempt,
+                    attempts,
+                    exc,
+                )
+
+            if attempt < attempts:
+                await asyncio.sleep(server.retry_backoff_seconds * attempt)
+
+        if last_error:
+            raise last_error
+        raise MCPToolError(f"MCP tool call failed: {server_name}:{tool}")
+
+    async def _initialize_server_with_retries(
+        self,
+        server_name: str,
+        server_config: MCPServerConfig,
+    ) -> None:
+        last_error: Exception | None = None
+        attempts = max(1, server_config.retry_attempts)
+
+        for attempt in range(1, attempts + 1):
+            try:
+                started_at = perf_counter()
+                logger.info(
+                    "trip_generation[%s] MCP server init attempt %d/%d server=%s command=%s",
+                    self.job_id,
+                    attempt,
+                    attempts,
+                    server_name,
+                    self._command_preview(server_config),
+                )
+                await self._disconnect_server(server_name)
+                await asyncio.wait_for(
+                    self._connect_local_server(server_name, server_config),
+                    timeout=self._initialize_timeout(server_config),
+                )
+                self._init_errors.pop(server_name, None)
+                logger.info(
+                    "trip_generation[%s] MCP server init succeeded server=%s elapsed=%.2fs",
+                    self.job_id,
+                    server_name,
+                    perf_counter() - started_at,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "MCP server %s failed to initialize on attempt %d/%d: %s",
+                    server_name,
+                    attempt,
+                    attempts,
+                    exc,
+                )
+                await self._disconnect_server(server_name)
+                if attempt < attempts:
+                    await asyncio.sleep(server_config.retry_backoff_seconds * attempt)
+
+        if last_error:
+            logger.error("MCP server %s failed to initialize after %d attempts", server_name, attempts)
+            self._sessions[server_name] = None
+            self._init_errors[server_name] = self._format_init_error(server_config, last_error)
+
+    def _initialize_timeout(self, server: MCPServerConfig) -> float:
+        if server.initialize_timeout_seconds is not None:
+            return server.initialize_timeout_seconds
+        return min(server.timeout_seconds, 12.0)
+
+    async def _disconnect_server(self, server_name: str) -> None:
+        self._sessions.pop(server_name, None)
+        stack = self._exit_stacks.pop(server_name, None)
+        if stack is not None:
+            logger.info("trip_generation[%s] MCP server disconnecting server=%s", self.job_id, server_name)
+            with suppress(Exception, asyncio.CancelledError):
+                await stack.aclose()
+            logger.info("trip_generation[%s] MCP server disconnected server=%s", self.job_id, server_name)
 
     async def _call_local(
         self, server_name: str, server: MCPServerConfig, tool: str, params: dict[str, Any]
@@ -64,14 +170,38 @@ class MCPClientManager:
             )
 
         try:
+            started_at = perf_counter()
             result = await asyncio.wait_for(
                 session.call_tool(tool, arguments=params),
                 timeout=server.timeout_seconds,
             )
-            return self._parse_mcp_result(result)
+            parsed = self._parse_mcp_result(result)
+            logger.info(
+                "trip_generation[%s] MCP tool call succeeded server=%s tool=%s elapsed=%.2fs result=%s",
+                self.job_id,
+                server_name,
+                tool,
+                perf_counter() - started_at,
+                self._json_preview(parsed),
+            )
+            return parsed
         except asyncio.TimeoutError:
+            logger.warning(
+                "trip_generation[%s] MCP tool call timed out server=%s tool=%s timeout=%.0fs",
+                self.job_id,
+                server_name,
+                tool,
+                server.timeout_seconds,
+            )
             raise MCPTimeoutError(f"MCP tool {tool} timed out")
         except Exception as exc:
+            logger.warning(
+                "trip_generation[%s] MCP tool call failed server=%s tool=%s error=%s",
+                self.job_id,
+                server_name,
+                tool,
+                exc,
+            )
             raise MCPToolError(f"MCP tool call failed: {exc}")
 
     async def _connect_local_server(self, server_name: str, server: MCPServerConfig) -> None:
@@ -84,20 +214,23 @@ class MCPClientManager:
         if not server.command:
             raise MCPError(f"Server {server_name} missing command")
 
+        stack = AsyncExitStack()
         parameters = StdioServerParameters(
             command=server.command,
             args=server.args,
             env=server.env,
         )
-        read_stream, write_stream = await self._exit_stack.enter_async_context(
-            stdio_client(parameters)
-        )
-        session = await self._exit_stack.enter_async_context(
-            ClientSession(read_stream, write_stream)
-        )
-        await session.initialize()
-        self._sessions[server_name] = session
-        logger.info("MCP server %s initialized", server_name)
+        try:
+            read_stream, write_stream = await stack.enter_async_context(stdio_client(parameters))
+            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+            await session.initialize()
+            self._exit_stacks[server_name] = stack
+            self._sessions[server_name] = session
+            logger.info("MCP server %s initialized", server_name)
+        except BaseException:
+            with suppress(Exception, asyncio.CancelledError):
+                await stack.aclose()
+            raise
 
     def _format_init_error(self, server: MCPServerConfig, exc: Exception) -> str:
         command = " ".join([server.command or "", *server.args]).strip()
@@ -106,10 +239,23 @@ class MCPClientManager:
         error = str(exc).strip() or exc.__class__.__name__
         return (
             f"failed to start command `{command}` within "
-            f"{min(server.timeout_seconds, 8.0):.0f}s; error={error}. "
+            f"{self._initialize_timeout(server):.0f}s; error={error}. "
             "Check that Node.js/npm can run npx, network access is available for first-time "
             "package download, and required environment variables are configured."
         )
+
+    def _is_retryable_tool_error(self, exc: MCPToolError) -> bool:
+        message = str(exc).lower()
+        if message.startswith("server ") and "not found" in message:
+            return False
+        if message.startswith("mcp server ") and "not connected" in message:
+            return False
+        non_retryable_fragments = (
+            "unknown tool",
+            "invalid arguments",
+            "validation",
+        )
+        return not any(fragment in message for fragment in non_retryable_fragments)
 
     def _parse_mcp_result(self, result: Any) -> dict[str, Any]:
         if hasattr(result, "content"):
@@ -141,3 +287,16 @@ class MCPClientManager:
                         except json.JSONDecodeError:
                             return {"text": item["text"]}
         return {"result": str(result)}
+
+    def _command_preview(self, server: MCPServerConfig) -> str:
+        return " ".join([server.command or "", *server.args]).strip() or "<missing command>"
+
+    def _json_preview(self, value: Any, max_length: int = 500) -> str:
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        except TypeError:
+            text = str(value)
+        compact = " ".join(text.split())
+        if len(compact) <= max_length:
+            return compact
+        return f"{compact[:max_length]}..."

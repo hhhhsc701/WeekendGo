@@ -7,13 +7,17 @@ import { Button } from "@/components/ui/button";
 import { deleteTrip } from "@/lib/api";
 import type { TripOutput } from "@/types/trip";
 
+type ItineraryCardTrip = Partial<TripOutput> & Pick<TripOutput, "id" | "title">;
+
 interface ItineraryCardProps {
-  trip: TripOutput;
+  trip: ItineraryCardTrip;
   onDelete?: () => void;
 }
 
-function formatDateRange(dateStr: string, days: number): string {
+function formatDateRange(dateStr?: string, days?: number): string | null {
+  if (!dateStr || !days) return null;
   const startDate = new Date(dateStr);
+  if (Number.isNaN(startDate.getTime())) return null;
   const endDate = new Date(startDate);
   endDate.setDate(startDate.getDate() + days - 1);
 
@@ -34,6 +38,7 @@ export function ItineraryCard({ trip, onDelete }: ItineraryCardProps) {
   const router = useRouter();
   const [deleting, setDeleting] = useState(false);
   const weatherSummary = trip.weather_summary?.summary?.trim();
+  const dateRange = formatDateRange(trip.input?.date, trip.input?.days);
 
   const handleClick = () => {
     router.push(`/itinerary/${trip.id}`);
@@ -68,34 +73,42 @@ export function ItineraryCard({ trip, onDelete }: ItineraryCardProps) {
             </h3>
 
             <div className="mt-3 space-y-2">
-              <div className="flex items-center gap-2 text-sm text-muted">
-                <MapPin className="w-4 h-4 shrink-0" />
-                <span>{trip.input.city}</span>
-                {trip.input.departure_city && (
-                  <span className="text-xs opacity-70">
-                    (从{trip.input.departure_city}出发)
-                  </span>
-                )}
-              </div>
-
-              <div className="flex items-center gap-2 text-sm text-muted">
-                <Calendar className="w-4 h-4 shrink-0" />
-                <span>{formatDateRange(trip.input.date, trip.input.days)}</span>
-              </div>
-
-              <div className="flex items-center gap-4 text-sm text-muted">
-                <div className="flex items-center gap-1">
-                  <Clock className="w-4 h-4 shrink-0" />
-                  <span>{trip.input.days}天</span>
+              {trip.input?.city && (
+                <div className="flex items-center gap-2 text-sm text-muted">
+                  <MapPin className="w-4 h-4 shrink-0" />
+                  <span>{trip.input.city}</span>
+                  {trip.input.departure_city && (
+                    <span className="text-xs opacity-70">
+                      (从{trip.input.departure_city}出发)
+                    </span>
+                  )}
                 </div>
+              )}
 
-                {trip.total_budget && (
-                  <div className="flex items-center gap-1">
-                    <DollarSign className="w-4 h-4 shrink-0" />
-                    <span>¥{trip.total_budget}</span>
-                  </div>
-                )}
-              </div>
+              {dateRange && (
+                <div className="flex items-center gap-2 text-sm text-muted">
+                  <Calendar className="w-4 h-4 shrink-0" />
+                  <span>{dateRange}</span>
+                </div>
+              )}
+
+              {(trip.input?.days || trip.total_budget) && (
+                <div className="flex items-center gap-4 text-sm text-muted">
+                  {trip.input?.days && (
+                    <div className="flex items-center gap-1">
+                      <Clock className="w-4 h-4 shrink-0" />
+                      <span>{trip.input.days}天</span>
+                    </div>
+                  )}
+
+                  {trip.total_budget && (
+                    <div className="flex items-center gap-1">
+                      <DollarSign className="w-4 h-4 shrink-0" />
+                      <span>¥{trip.total_budget}</span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 

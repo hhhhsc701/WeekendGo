@@ -22,6 +22,19 @@ export interface WeatherSummary {
   temperature_c?: number | null;
 }
 
+export interface TransportDetail {
+  mode?: string | null;
+  code?: string | null;
+  departure?: string | null;
+  arrival?: string | null;
+  departure_coordinates?: Coordinates | null;
+  arrival_coordinates?: Coordinates | null;
+  departure_time?: string | null;
+  arrival_time?: string | null;
+  duration?: string | null;
+  cost?: number | null;
+}
+
 export interface TripItem {
   start_time: string;
   end_time: string;
@@ -29,6 +42,7 @@ export interface TripItem {
   place: Place;
   estimated_cost?: number | null;
   transport?: string | null;
+  transport_detail?: TransportDetail | null;
   notes?: string | null;
 }
 
@@ -40,6 +54,7 @@ export interface TripInput {
   interests: string[];
   companions: CompanionType;
   departure_city?: string | null;
+  departure_coordinates?: Coordinates | null;
   notes?: string | null;
 }
 

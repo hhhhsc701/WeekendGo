@@ -52,6 +52,12 @@ Fill `.env` with the required keys before running live MCP or LLM flows.
 
 ## Run
 
+All services:
+
+```bash
+scripts/run_all.sh
+```
+
 Backend:
 
 ```bash

@@ -1,7 +1,7 @@
 "use client";
 
-import { Clock, MapPin, DollarSign, Car, Info } from "lucide-react";
-import type { TripItem } from "@/types/trip";
+import { Clock, MapPin, DollarSign, Car, Info, Plane, Train } from "lucide-react";
+import type { TransportDetail, TripItem } from "@/types/trip";
 
 interface TimelineViewProps {
   items: TripItem[];
@@ -113,6 +113,36 @@ function formatDayLabel(startDateStr: string, dayIndex: number): string {
   return `第${dayIndex + 1}天 · ${month}月${day}日 ${weekday}`;
 }
 
+function hasTransportDetail(detail?: TransportDetail | null): detail is TransportDetail {
+  return Boolean(
+    detail &&
+      (detail.code ||
+        detail.departure_time ||
+        detail.arrival_time ||
+        detail.cost !== null && detail.cost !== undefined)
+  );
+}
+
+function transportModeLabel(detail: TransportDetail): string {
+  if (detail.mode === "flight") return "航班";
+  if (detail.mode === "train") return "车次";
+  return "交通";
+}
+
+function formatTransportRoute(detail: TransportDetail): string | null {
+  if (detail.departure && detail.arrival) {
+    return `${detail.departure} → ${detail.arrival}`;
+  }
+  return detail.departure || detail.arrival || null;
+}
+
+function formatTransportTime(detail: TransportDetail): string | null {
+  if (detail.departure_time && detail.arrival_time) {
+    return `${formatTime(detail.departure_time)} - ${formatTime(detail.arrival_time)}`;
+  }
+  return detail.departure_time || detail.arrival_time || null;
+}
+
 export function TimelineView({ items, startDate, tripDays }: TimelineViewProps) {
   if (items.length === 0) {
     return (
@@ -167,7 +197,7 @@ export function TimelineView({ items, startDate, tripDays }: TimelineViewProps) 
                       </div>
                     </div>
 
-                    {item.estimated_cost && (
+                    {item.estimated_cost !== null && item.estimated_cost !== undefined && (
                       <div className="flex items-center gap-1 text-sm font-medium text-primary shrink-0">
                         <DollarSign className="w-4 h-4" />
                         <span>¥{item.estimated_cost}</span>
@@ -179,6 +209,40 @@ export function TimelineView({ items, startDate, tripDays }: TimelineViewProps) 
                     <div className="mt-3 pt-3 border-t border-border/50 flex items-center gap-2 text-sm text-muted">
                       <Car className="w-4 h-4" />
                       <span>{item.transport}</span>
+                    </div>
+                  )}
+
+                  {hasTransportDetail(item.transport_detail) && (
+                    <div className="mt-3 rounded-md border border-primary/20 bg-primary/5 p-3 text-sm">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        {item.transport_detail.mode === "flight" ? (
+                          <Plane className="h-4 w-4 text-primary" />
+                        ) : (
+                          <Train className="h-4 w-4 text-primary" />
+                        )}
+                        <span className="font-medium text-foreground">
+                          {transportModeLabel(item.transport_detail)}
+                          {item.transport_detail.code ? ` ${item.transport_detail.code}` : ""}
+                        </span>
+                        {formatTransportRoute(item.transport_detail) && (
+                          <span className="text-muted">
+                            {formatTransportRoute(item.transport_detail)}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-muted">
+                        {formatTransportTime(item.transport_detail) && (
+                          <span>时间：{formatTransportTime(item.transport_detail)}</span>
+                        )}
+                        {item.transport_detail.duration && (
+                          <span>耗时：{item.transport_detail.duration}</span>
+                        )}
+                        {item.transport_detail.cost !== null && item.transport_detail.cost !== undefined && (
+                          <span className="font-medium text-primary">
+                            费用：¥{item.transport_detail.cost}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   )}
 

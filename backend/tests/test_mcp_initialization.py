@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from types import SimpleNamespace
 
@@ -20,24 +21,28 @@ def build_config() -> MCPConfig:
                 mode="local",
                 command="amap",
                 tools=["geocode", "search_poi_around"],
+                retry_backoff_seconds=0,
             ),
             "google-maps-mcp": MCPServerConfig(
                 enabled=True,
                 mode="local",
                 command="google",
                 tools=["geocode", "maps_search_nearby"],
+                retry_backoff_seconds=0,
             ),
             "weather": MCPServerConfig(
                 enabled=True,
                 mode="local",
                 command="weather",
                 tools=["search_location", "get_forecast"],
+                retry_backoff_seconds=0,
             ),
             "train-12306": MCPServerConfig(
                 enabled=True,
                 mode="local",
                 command="train",
                 tools=["query_trains"],
+                retry_backoff_seconds=0,
             ),
         },
         routes={
@@ -85,6 +90,21 @@ async def test_initialize_only_connects_selected_servers() -> None:
     assert connected == ["amap-mcp"]
 
 
+async def test_disconnect_suppresses_cancelled_cleanup_error() -> None:
+    class CancelledCloseStack:
+        async def aclose(self) -> None:
+            raise asyncio.CancelledError("Cancelled via cancel scope")
+
+    manager = MCPClientManager(build_config())
+    manager._sessions["weather"] = object()
+    manager._exit_stacks["weather"] = CancelledCloseStack()  # type: ignore[assignment]
+
+    await manager.close()
+
+    assert manager._sessions == {}
+    assert manager._exit_stacks == {}
+
+
 async def test_call_reports_initialization_failure_reason() -> None:
     manager = MCPClientManager(build_config())
 
@@ -102,6 +122,47 @@ async def test_call_reports_initialization_failure_reason() -> None:
     assert "MCP server amap-mcp not connected" in message
     assert "npx package download failed" in message
     assert "`amap`" in message
+
+
+async def test_initialize_retries_transient_startup_failure() -> None:
+    manager = MCPClientManager(build_config())
+    attempts = 0
+
+    async def flaky_connect(server_name: str, _: MCPServerConfig) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("stdio handshake failed")
+        manager._sessions[server_name] = object()
+
+    manager._connect_local_server = flaky_connect  # type: ignore[method-assign]
+
+    await manager.initialize({"weather"})
+    await manager.close()
+
+    assert attempts == 2
+
+
+async def test_call_retries_transient_tool_failure() -> None:
+    class FlakySession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def call_tool(self, _: str, arguments: dict[str, object]) -> SimpleNamespace:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("OpenMeteo API is currently unavailable")
+            return SimpleNamespace(content=[SimpleNamespace(text='{"ok": true}')])
+
+    manager = MCPClientManager(build_config())
+    session = FlakySession()
+    manager._sessions["weather"] = session
+
+    result = await manager.call("weather", "get_forecast", {"latitude": 30, "longitude": 114})
+    await manager.close()
+
+    assert result == {"ok": True}
+    assert session.calls == 2
 
 
 def test_parse_mcp_result_accepts_dict_text_content() -> None:

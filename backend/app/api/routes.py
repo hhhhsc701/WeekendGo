@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -18,6 +20,7 @@ from app.mcp.models import MCPConfig
 from app.models.trip import TripInput, TripOutput
 
 router = APIRouter(prefix="/api")
+logger = logging.getLogger(__name__)
 
 
 async def get_trip_repository() -> AsyncIterator[TripRepository]:
@@ -79,37 +82,77 @@ async def generate_trip(
     settings: Settings = Depends(get_settings),
     repository: TripRepository = Depends(get_trip_repository),
 ) -> TripOutput:
+    job_id = uuid.uuid4().hex[:8]
+    logger.info(
+        "trip_generation[%s] request received city=%s date=%s days=%s interests=%s departure_city=%s",
+        job_id,
+        trip_input.city,
+        trip_input.date.isoformat(),
+        trip_input.days,
+        ",".join(trip_input.interests),
+        trip_input.departure_city or "-",
+    )
     mcp_config = load_mcp_config(settings.mcp_config_path)
-    mcp_manager = MCPClientManager(mcp_config)
+    mcp_manager = MCPClientManager(mcp_config, job_id=job_id)
 
     try:
         required_servers = resolve_required_servers(mcp_config, trip_input)
+        logger.info(
+            "trip_generation[%s] required MCP servers: %s",
+            job_id,
+            ", ".join(sorted(required_servers)) or "-",
+        )
         llm_client = build_llm_client(settings)
         agent = TripAgent(
             llm_client=llm_client,
             mcp_manager=mcp_manager,
             model=settings.openai_model,
+            job_id=job_id,
         )
 
         async def run_generation() -> TripOutput:
+            logger.info("trip_generation[%s] initializing MCP servers", job_id)
             await mcp_manager.initialize(required_servers)
+            logger.info("trip_generation[%s] MCP initialization finished", job_id)
+            logger.info("trip_generation[%s] agent run started model=%s", job_id, settings.openai_model)
             trip = await agent.run(trip_input)
-            return repository.create_trip(trip)
+            logger.info(
+                "trip_generation[%s] agent run finished title=%s items=%d",
+                job_id,
+                trip.title,
+                len(trip.items),
+            )
+            saved_trip = repository.create_trip(trip)
+            logger.info("trip_generation[%s] saved trip id=%s", job_id, saved_trip.id)
+            return saved_trip
 
-        return await asyncio.wait_for(
+        result = await asyncio.wait_for(
             run_generation(),
             timeout=settings.generation_timeout_seconds,
         )
+        logger.info("trip_generation[%s] request completed", job_id)
+        return result
     except asyncio.TimeoutError:
+        logger.warning(
+            "trip_generation[%s] timed out after %.0f seconds",
+            job_id,
+            settings.generation_timeout_seconds,
+        )
         raise HTTPException(
             status_code=504,
             detail=f"Trip generation timed out after {settings.generation_timeout_seconds:.0f} seconds",
         )
     except AgentTimeoutError as exc:
+        logger.warning("trip_generation[%s] agent timeout: %s", job_id, exc)
         raise HTTPException(status_code=504, detail=str(exc))
     except AgentOutputError as exc:
+        logger.warning("trip_generation[%s] agent output error: %s", job_id, exc)
         raise HTTPException(status_code=502, detail=str(exc))
+    except asyncio.CancelledError:
+        logger.warning("trip_generation[%s] request cancelled", job_id)
+        raise
     finally:
+        logger.info("trip_generation[%s] closing MCP manager", job_id)
         await mcp_manager.close()
 
 
@@ -124,10 +167,10 @@ async def get_trip(
     return trip
 
 
-@router.get("/trips", tags=["trips"])
+@router.get("/trips", response_model=list[TripOutput], tags=["trips"])
 async def list_trips(
     repository: TripRepository = Depends(get_trip_repository),
-) -> list[dict[str, Any]]:
+) -> list[TripOutput]:
     return repository.list_trips()
 
 

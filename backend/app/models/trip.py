@@ -74,6 +74,48 @@ class WeatherSummary(BaseModel):
         return value
 
 
+class TransportDetail(BaseModel):
+    mode: str | None = None
+    code: str | None = None
+    departure: str | None = None
+    arrival: str | None = None
+    departure_coordinates: Coordinates | None = None
+    arrival_coordinates: Coordinates | None = None
+    departure_time: str | None = None
+    arrival_time: str | None = None
+    duration: str | None = None
+    cost: float | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_transport_detail(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return {"code": value}
+        if not isinstance(value, dict):
+            return value
+
+        detail = dict(value)
+        detail.setdefault("code", detail.get("train_number") or detail.get("flight_number") or detail.get("number"))
+        detail.setdefault("departure", detail.get("from") or detail.get("from_station") or detail.get("departure_station"))
+        detail.setdefault("arrival", detail.get("to") or detail.get("to_station") or detail.get("arrival_station"))
+        detail.setdefault(
+            "departure_coordinates",
+            detail.get("from_coordinates")
+            or detail.get("departure_location")
+            or detail.get("from_location"),
+        )
+        detail.setdefault(
+            "arrival_coordinates",
+            detail.get("to_coordinates")
+            or detail.get("arrival_location")
+            or detail.get("to_location"),
+        )
+        detail.setdefault("departure_time", detail.get("depart_time") or detail.get("start_time"))
+        detail.setdefault("arrival_time", detail.get("arrive_time") or detail.get("end_time"))
+        detail.setdefault("cost", detail.get("price") or detail.get("fare"))
+        return detail
+
+
 class TripItem(BaseModel):
     start_time: str
     end_time: str
@@ -81,6 +123,7 @@ class TripItem(BaseModel):
     place: Place
     estimated_cost: float | None = None
     transport: str | None = None
+    transport_detail: TransportDetail | None = None
     notes: str | None = None
 
     @model_validator(mode="before")
@@ -104,6 +147,8 @@ class TripItem(BaseModel):
 
         if "place" not in item:
             item["place"] = item.get("location") or item.get("venue") or "地点"
+        if "transport_detail" not in item:
+            item["transport_detail"] = item.get("train") or item.get("flight") or item.get("traffic")
 
         return item
 
@@ -116,6 +161,7 @@ class TripInput(BaseModel):
     interests: list[str] = Field(min_length=1)
     companions: CompanionType
     departure_city: str | None = None
+    departure_coordinates: Coordinates | None = None
     notes: str | None = None
 
 

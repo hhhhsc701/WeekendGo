@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime
-from typing import Any
 
 from app.models.trip import TripOutput
 
@@ -37,18 +36,11 @@ class TripRepository:
             return None
         return TripOutput.model_validate(json.loads(row["output_json"]))
 
-    def list_trips(self) -> list[dict[str, Any]]:
+    def list_trips(self) -> list[TripOutput]:
         rows = self.conn.execute(
-            "SELECT id, title, created_at FROM trips ORDER BY created_at DESC"
+            "SELECT output_json FROM trips ORDER BY created_at DESC"
         ).fetchall()
-        return [
-            {
-                "id": row["id"],
-                "title": row["title"],
-                "created_at": row["created_at"],
-            }
-            for row in rows
-        ]
+        return [TripOutput.model_validate(json.loads(row["output_json"])) for row in rows]
 
     def delete_trip(self, trip_id: str) -> bool:
         cursor = self.conn.execute("DELETE FROM trips WHERE id = ?", (trip_id,))

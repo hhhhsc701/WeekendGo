@@ -92,7 +92,7 @@ function MapInner({ places, className }: MapViewProps) {
       const map = L.map(containerRef.current, {
         center: [CHINA_CENTER.lat, CHINA_CENTER.lng],
         zoom: 5,
-        scrollWheelZoom: false,
+        scrollWheelZoom: true,
       });
 
       L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -131,11 +131,14 @@ function MapInner({ places, className }: MapViewProps) {
       markersRef.current = mapPoints.map(({ latLng, place }) => {
         bounds.push(latLng);
         const address = place.address ? `<br/><small>${escapeHtml(place.address)}</small>` : "";
+        const isTransportPoint = place.category === "departure" || place.category === "transport";
+        const color = isTransportPoint ? "#dc2626" : "#2563eb";
+        const fillColor = isTransportPoint ? "#ef4444" : "#3b82f6";
         return L.circleMarker(latLng, {
-          radius: 7,
-          color: "#2563eb",
+          radius: isTransportPoint ? 8 : 7,
+          color,
           weight: 2,
-          fillColor: "#3b82f6",
+          fillColor,
           fillOpacity: 0.85,
         })
           .bindPopup(`<strong>${escapeHtml(place.name)}</strong>${address}`)

@@ -1,7 +1,17 @@
 "use client";
 
-import { useState } from "react";
-import { Calendar, MapPin, Clock, Users, DollarSign, Sparkles, Plane, MessageSquare } from "lucide-react";
+import { useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import {
+  Calendar,
+  MapPin,
+  Clock,
+  Users,
+  DollarSign,
+  Sparkles,
+  Plane,
+  MessageSquare,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { TripInput, CompanionType } from "@/types/trip";
@@ -17,17 +27,60 @@ const companionOptions: { value: CompanionType; label: string }[] = [
   { value: "friends", label: "好友同行" },
 ];
 
+const interestOptions = ["美食", "摄影", "历史", "自然风光", "博物馆", "亲子", "夜生活", "Citywalk"];
+
 export function TripForm({ onSubmit }: TripFormProps) {
   const [city, setCity] = useState("");
   const [date, setDate] = useState("");
   const [days, setDays] = useState(2);
   const [budget, setBudget] = useState<string>("");
-  const [interests, setInterests] = useState("");
+  const [interests, setInterests] = useState<string[]>([]);
+  const [interestInput, setInterestInput] = useState("");
   const [companions, setCompanions] = useState<CompanionType>("solo");
   const [departureCity, setDepartureCity] = useState("");
   const [notes, setNotes] = useState("");
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const dateInputRef = useRef<HTMLInputElement>(null);
+  const interestInputRef = useRef<HTMLInputElement>(null);
+
+  const openDatePicker = () => {
+    dateInputRef.current?.showPicker?.();
+  };
+
+  const addInterest = (value: string) => {
+    const normalized = value.trim();
+    if (!normalized) return;
+    setInterests((current) => {
+      if (current.some((item) => item.toLowerCase() === normalized.toLowerCase())) {
+        return current;
+      }
+      return [...current, normalized];
+    });
+    setErrors((current) => {
+      if (!current.interests) return current;
+      const rest = { ...current };
+      delete rest.interests;
+      return rest;
+    });
+    setInterestInput("");
+  };
+
+  const removeInterest = (value: string) => {
+    setInterests((current) =>
+      current.filter((item) => item.toLowerCase() !== value.toLowerCase())
+    );
+  };
+
+  const handleInterestKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter" || event.key === "," || event.key === "，") {
+      event.preventDefault();
+      addInterest(interestInput);
+    }
+    if (event.key === "Backspace" && !interestInput && interests.length > 0) {
+      removeInterest(interests[interests.length - 1]);
+    }
+  };
 
   const validate = (): boolean => {
     const newErrors: Record<string, string> = {};
@@ -44,12 +97,7 @@ export function TripForm({ onSubmit }: TripFormProps) {
       newErrors.days = "行程天数需在1-14天之间";
     }
     
-    const interestList = interests
-      .split(",")
-      .map((i) => i.trim())
-      .filter((i) => i.length > 0);
-    
-    if (interestList.length === 0) {
+    if (interests.length === 0) {
       newErrors.interests = "请至少输入一个兴趣偏好";
     }
     
@@ -57,25 +105,20 @@ export function TripForm({ onSubmit }: TripFormProps) {
     return Object.keys(newErrors).length === 0;
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     
     if (!validate()) return;
     
     setLoading(true);
     setErrors({});
-    
-    const interestList = interests
-      .split(",")
-      .map((i) => i.trim())
-      .filter((i) => i.length > 0);
-    
+
     const input: TripInput = {
       city: city.trim(),
       date,
       days,
       budget: budget ? parseFloat(budget) : null,
-      interests: interestList,
+      interests,
       companions,
       departure_city: departureCity.trim() || null,
       notes: notes.trim() || null,
@@ -125,13 +168,25 @@ export function TripForm({ onSubmit }: TripFormProps) {
           <Calendar className="w-4 h-4 text-primary" />
           出发日期
         </label>
-        <Input
-          type="date"
-          value={date}
-          onChange={(e) => setDate(e.target.value)}
-          min={new Date().toISOString().split("T")[0]}
-          className={errors.date ? "border-red-500 focus-visible:ring-red-500" : ""}
-        />
+        <div className="relative">
+          <Input
+            ref={dateInputRef}
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            onClick={openDatePicker}
+            min={new Date().toISOString().split("T")[0]}
+            className={
+              errors.date
+                ? "cursor-pointer pr-10 border-red-500 focus-visible:ring-red-500 [&::-webkit-calendar-picker-indicator]:opacity-0"
+                : "cursor-pointer pr-10 [&::-webkit-calendar-picker-indicator]:opacity-0"
+            }
+          />
+          <Calendar
+            className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground"
+            aria-hidden="true"
+          />
+        </div>
         {errors.date && <p className="text-xs text-red-500">{errors.date}</p>}
       </div>
 
@@ -186,15 +241,60 @@ export function TripForm({ onSubmit }: TripFormProps) {
       <div className="space-y-1.5 sm:col-span-2">
         <label className="flex items-center gap-1.5 text-sm font-medium text-foreground">
           <Sparkles className="w-4 h-4 text-primary" />
-          兴趣偏好（逗号分隔）
+          兴趣偏好
         </label>
-        <Input
-          type="text"
-          placeholder="例如：美食,摄影,历史,自然风光..."
-          value={interests}
-          onChange={(e) => setInterests(e.target.value)}
-          className={errors.interests ? "border-red-500 focus-visible:ring-red-500" : ""}
-        />
+        <div
+          className={`flex min-h-10 w-full flex-wrap items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-2 ${
+            errors.interests ? "border-red-500" : "border-border"
+          }`}
+          onClick={() => interestInputRef.current?.focus()}
+        >
+          {interests.map((interest) => (
+            <button
+              key={interest}
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                removeInterest(interest);
+              }}
+              className="inline-flex h-6 items-center gap-1 rounded-full bg-primary/10 px-2 text-xs font-medium text-primary hover:bg-primary/15"
+            >
+              {interest}
+              <X className="h-3 w-3" />
+            </button>
+          ))}
+          <input
+            id="interest-input"
+            ref={interestInputRef}
+            value={interestInput}
+            onChange={(event) => setInterestInput(event.target.value)}
+            onKeyDown={handleInterestKeyDown}
+            onBlur={() => addInterest(interestInput)}
+            placeholder={interests.length === 0 ? "输入后回车添加兴趣" : ""}
+            className="h-6 min-w-[9rem] flex-1 bg-transparent outline-none placeholder:text-muted"
+          />
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {interestOptions.map((option) => {
+            const selected = interests.some(
+              (interest) => interest.toLowerCase() === option.toLowerCase()
+            );
+            return (
+              <button
+                key={option}
+                type="button"
+                onClick={() => (selected ? removeInterest(option) : addInterest(option))}
+                className={`h-7 rounded-full border px-3 text-xs font-medium transition-colors ${
+                  selected
+                    ? "border-primary bg-primary text-primary-foreground"
+                    : "border-border bg-background text-muted hover:border-primary/50 hover:text-foreground"
+                }`}
+              >
+                {option}
+              </button>
+            );
+          })}
+        </div>
         {errors.interests && <p className="text-xs text-red-500">{errors.interests}</p>}
       </div>
 

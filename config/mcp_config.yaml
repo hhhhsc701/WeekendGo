@@ -4,6 +4,9 @@ mcp:
     amap-mcp:
       enabled: true
       mode: local
+      initialize_timeout_seconds: 15
+      retry_attempts: 2
+      retry_backoff_seconds: 0.5
       command: npx
       args:
         - -y
@@ -18,6 +21,9 @@ mcp:
     google-maps-mcp:
       enabled: true
       mode: local
+      initialize_timeout_seconds: 15
+      retry_attempts: 2
+      retry_backoff_seconds: 0.5
       command: npx
       args:
         - -y
@@ -34,6 +40,9 @@ mcp:
       enabled: true
       mode: local
       timeout_seconds: 8
+      initialize_timeout_seconds: 15
+      retry_attempts: 2
+      retry_backoff_seconds: 0.5
       command: npx
       args:
         - -y
@@ -48,6 +57,9 @@ mcp:
     train-12306:
       enabled: true
       mode: local
+      initialize_timeout_seconds: 15
+      retry_attempts: 2
+      retry_backoff_seconds: 0.5
       command: npx
       args:
         - -y

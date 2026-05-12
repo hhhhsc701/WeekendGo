@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.agent.trip_agent import TripAgent
-from app.models.trip import CompanionType, Coordinates, Place, TripInput, TripOutput
+from app.models.trip import CompanionType, Coordinates, Place, TripInput, TripItem, TripOutput
 
 
 class FakeChatCompletion:
@@ -222,6 +222,20 @@ LOCATION_RESULT: dict[str, Any] = {
     "text": "*Latitude: 39.9042, Longitude: 116.4074*",
 }
 
+TRAIN_RESULT: dict[str, Any] = {
+    "trains": [
+        {
+            "train_number": "G1234",
+            "from_station": "北京南",
+            "to_station": "上海虹桥",
+            "depart_time": "08:00",
+            "arrive_time": "12:30",
+            "duration": "4小时30分",
+            "price": "553",
+        }
+    ]
+}
+
 
 @pytest.fixture
 def trip_input() -> TripInput:
@@ -246,6 +260,7 @@ def fake_mcp() -> FakeMCP:
             "amap-mcp:search_poi_around": SEARCH_POI_RESULT,
             "weather:search_location": LOCATION_RESULT,
             "weather:get_forecast": WEATHER_RESULT,
+            "train-12306:query_trains": TRAIN_RESULT,
         }
     )
 
@@ -420,6 +435,155 @@ class TestTripAgentCompleteFlow:
 
         assert isinstance(result, TripOutput)
         assert result.weather_summary.summary == "Clear sky，High 25°C / Low 18°C，降水概率 10%"
+
+    @pytest.mark.asyncio
+    async def test_finish_enriches_missing_coordinates_and_item_costs(
+        self, trip_input: TripInput, fake_mcp: FakeMCP
+    ) -> None:
+        """POI results backfill map coordinates and missing per-step budgets."""
+        output_without_coordinates_or_costs = {
+            "title": "北京周末游",
+            "items": [
+                {
+                    "start_time": "09:00",
+                    "end_time": "11:00",
+                    "activity": "故宫游览",
+                    "place": {"name": "故宫博物院"},
+                },
+                {
+                    "start_time": "12:00",
+                    "end_time": "13:00",
+                    "activity": "午餐",
+                    "place": {"name": "本地餐厅"},
+                },
+            ],
+        }
+        fake_llm = FakeLLM(
+            responses=[
+                {"tool_calls": [{"name": "search_poi", "arguments": {"query": "景点"}}]},
+                {"tool_calls": [{"name": "finish", "arguments": output_without_coordinates_or_costs}]},
+            ]
+        )
+
+        agent = TripAgent(llm_client=fake_llm, mcp_manager=fake_mcp, max_iterations=10)
+        result = await agent.run(trip_input)
+
+        assert isinstance(result, TripOutput)
+        assert result.items[0].place.coordinates is not None
+        assert result.items[0].place.coordinates.lng == 116.3972
+        assert result.items[0].place.coordinates.lat == 39.9163
+        assert result.items[0].estimated_cost == 60.0
+        assert result.items[1].estimated_cost == 80.0
+        assert result.total_budget == 140.0
+
+    @pytest.mark.asyncio
+    async def test_train_result_enriches_transport_detail(
+        self, trip_input: TripInput, fake_mcp: FakeMCP
+    ) -> None:
+        """Selected train numbers show concrete time and fare in itinerary items."""
+        output_with_train_reference = {
+            "title": "北京到上海周末游",
+            "items": [
+                {
+                    "start_time": "08:00",
+                    "end_time": "12:30",
+                    "activity": "乘坐高铁前往上海",
+                    "place": {"name": "上海虹桥站"},
+                    "transport": "G1234 高铁",
+                }
+            ],
+        }
+        fake_llm = FakeLLM(
+            responses=[
+                {
+                    "tool_calls": [
+                        {
+                            "name": "query_trains",
+                            "arguments": {"from": "北京", "to": "上海", "date": "2025-05-15"},
+                        }
+                    ]
+                },
+                {"tool_calls": [{"name": "finish", "arguments": output_with_train_reference}]},
+            ]
+        )
+
+        agent = TripAgent(llm_client=fake_llm, mcp_manager=fake_mcp, max_iterations=10)
+        result = await agent.run(trip_input)
+
+        assert isinstance(result, TripOutput)
+        detail = result.items[0].transport_detail
+        assert detail is not None
+        assert detail.mode == "train"
+        assert detail.code == "G1234"
+        assert detail.departure == "北京南"
+        assert detail.arrival == "上海虹桥"
+        assert detail.departure_time == "08:00"
+        assert detail.arrival_time == "12:30"
+        assert detail.cost == 553.0
+        assert result.items[0].estimated_cost == 553.0
+
+    @pytest.mark.asyncio
+    async def test_departure_city_coordinates_are_preserved_for_map(
+        self, trip_input: TripInput, fake_mcp: FakeMCP
+    ) -> None:
+        """Departure city geocode is included in input and transport detail map points."""
+        trip_input = trip_input.model_copy(update={"departure_city": "北京"})
+        output_with_train_reference = {
+            "title": "北京到上海周末游",
+            "items": [
+                {
+                    "start_time": "08:00",
+                    "end_time": "12:30",
+                    "activity": "乘坐高铁前往上海",
+                    "place": {"name": "上海虹桥站"},
+                    "transport": "G1234 高铁",
+                }
+            ],
+        }
+        fake_llm = FakeLLM(
+            responses=[
+                {
+                    "tool_calls": [
+                        {
+                            "name": "query_trains",
+                            "arguments": {"from": "北京", "to": "上海", "date": "2025-05-15"},
+                        }
+                    ]
+                },
+                {"tool_calls": [{"name": "finish", "arguments": output_with_train_reference}]},
+            ]
+        )
+
+        agent = TripAgent(llm_client=fake_llm, mcp_manager=fake_mcp, max_iterations=10)
+        result = await agent.run(trip_input)
+
+        assert result.input.departure_coordinates is not None
+        assert result.input.departure_coordinates.lng == 116.3972
+        assert result.input.departure_coordinates.lat == 39.9163
+        assert result.items[0].transport_detail is not None
+        assert result.items[0].transport_detail.departure_coordinates is not None
+        assert result.items[0].transport_detail.departure_coordinates.lng == 116.3972
+        assert result.items[0].transport_detail.departure_coordinates.lat == 39.9163
+
+    @pytest.mark.asyncio
+    async def test_departure_city_coordinates_use_fallback_when_geocode_fails(
+        self, trip_input: TripInput, fake_mcp: FakeMCP
+    ) -> None:
+        """Known departure cities still get a map point when MCP geocode fails."""
+        trip_input = trip_input.model_copy(update={"departure_city": "上海"})
+        fake_mcp.errors["amap-mcp:geocode"] = "geocode unavailable"
+        fake_llm = FakeLLM(
+            responses=[
+                {"tool_calls": [{"name": "finish", "arguments": SAMPLE_TRIP_OUTPUT}]},
+            ]
+        )
+
+        agent = TripAgent(llm_client=fake_llm, mcp_manager=fake_mcp, max_iterations=10)
+        result = await agent.run(trip_input)
+
+        assert result.input.departure_coordinates is not None
+        assert result.input.departure_coordinates.lng == 121.4737
+        assert result.input.departure_coordinates.lat == 31.2304
 
 
 class TestTripAgentFallback:
@@ -720,3 +884,28 @@ class TestPlaceCoercion:
         assert result.items[0].place.coordinates is not None
         assert result.items[0].place.coordinates.lng == 114.4258
         assert result.items[0].place.coordinates.lat == 30.6076
+
+    def test_trip_item_accepts_train_detail_aliases(self) -> None:
+        """Train/flight aliases are normalized into transport_detail."""
+        data = {
+            "start_time": "08:00",
+            "end_time": "12:30",
+            "activity": "乘坐高铁",
+            "place": "上海虹桥站",
+            "train": {
+                "train_number": "G1234",
+                "from_station": "北京南",
+                "to_station": "上海虹桥",
+                "depart_time": "08:00",
+                "arrive_time": "12:30",
+                "price": "553",
+            },
+        }
+
+        result = TripItem.model_validate(data)
+
+        assert result.transport_detail is not None
+        assert result.transport_detail.code == "G1234"
+        assert result.transport_detail.departure == "北京南"
+        assert result.transport_detail.arrival == "上海虹桥"
+        assert result.transport_detail.cost == 553.0

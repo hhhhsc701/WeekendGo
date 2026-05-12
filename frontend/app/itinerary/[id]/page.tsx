@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button";
 import { TimelineView } from "@/components/timeline-view";
 import { MapView } from "@/components/map-view";
 import { getTrip, ApiError } from "@/lib/api";
-import type { TripOutput } from "@/types/trip";
+import { getCityCoordinates } from "@/lib/city-coordinates";
+import type { Coordinates, Place, TripOutput } from "@/types/trip";
 
 function formatDate(dateStr: string): string {
   const date = new Date(dateStr);
@@ -31,6 +32,61 @@ function hasCoordinates(item: TripOutput["items"][number]): boolean {
     typeof coordinates?.lng === "number" &&
     Number.isFinite(coordinates.lng)
   );
+}
+
+function hasValidCoordinates(coordinates?: Coordinates | null): coordinates is Coordinates {
+  return (
+    typeof coordinates?.lat === "number" &&
+    Number.isFinite(coordinates.lat) &&
+    typeof coordinates?.lng === "number" &&
+    Number.isFinite(coordinates.lng)
+  );
+}
+
+function addUniquePlace(places: Place[], seen: Set<string>, place: Place): void {
+  if (!hasValidCoordinates(place.coordinates)) return;
+
+  const key = [
+    place.name.trim().toLowerCase(),
+    place.coordinates.lat.toFixed(6),
+    place.coordinates.lng.toFixed(6),
+  ].join("|");
+  if (seen.has(key)) return;
+
+  seen.add(key);
+  places.push(place);
+}
+
+function distanceMeters(a: Coordinates, b: Coordinates): number {
+  const earthRadiusMeters = 6371000;
+  const toRadians = (value: number) => (value * Math.PI) / 180;
+  const dLat = toRadians(b.lat - a.lat);
+  const dLng = toRadians(b.lng - a.lng);
+  const lat1 = toRadians(a.lat);
+  const lat2 = toRadians(b.lat);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return 2 * earthRadiusMeters * Math.asin(Math.sqrt(h));
+}
+
+function isInDestinationCity(place: Place, destinationCoordinates: Coordinates | null): boolean {
+  if (!destinationCoordinates || !hasValidCoordinates(place.coordinates)) return true;
+  return distanceMeters(place.coordinates, destinationCoordinates) <= 150000;
+}
+
+function buildMapPlaces(trip: TripOutput): Place[] {
+  const places: Place[] = [];
+  const seen = new Set<string>();
+  const destinationCoordinates = getCityCoordinates(trip.input.city);
+
+  trip.items.forEach((item) => {
+    if (hasCoordinates(item) && isInDestinationCity(item.place, destinationCoordinates)) {
+      addUniquePlace(places, seen, item.place);
+    }
+  });
+
+  return places;
 }
 
 function Skeleton() {
@@ -136,7 +192,7 @@ export default function ItineraryDetailPage() {
   }
 
   const weatherSummary = trip.weather_summary?.summary?.trim();
-  const placesWithCoords = trip.items.filter(hasCoordinates).map((item) => item.place);
+  const placesWithCoords = buildMapPlaces(trip);
 
   return (
     <main className="min-h-screen bg-background">
