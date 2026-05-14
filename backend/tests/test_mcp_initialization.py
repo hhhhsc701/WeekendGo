@@ -165,6 +165,40 @@ async def test_call_retries_transient_tool_failure() -> None:
     assert session.calls == 2
 
 
+async def test_call_treats_text_tool_errors_as_failures() -> None:
+    class UnknownToolSession:
+        async def call_tool(self, _: str, arguments: dict[str, object]) -> SimpleNamespace:
+            return SimpleNamespace(content=[SimpleNamespace(text="Unknown tool: geocode")])
+
+    manager = MCPClientManager(build_config())
+    manager._sessions["amap-mcp"] = UnknownToolSession()
+
+    with pytest.raises(MCPToolError) as exc_info:
+        await manager.call("amap-mcp", "geocode", {"address": "杭州"})
+    await manager.close()
+
+    assert "Unknown tool: geocode" in str(exc_info.value)
+
+
+async def test_initialize_records_runtime_tool_list() -> None:
+    class ToolsSession:
+        async def list_tools(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                tools=[
+                    SimpleNamespace(name="maps_geo"),
+                    SimpleNamespace(name="maps_around_search"),
+                ]
+            )
+
+    manager = MCPClientManager(build_config())
+    manager._sessions["amap-mcp"] = ToolsSession()
+
+    await manager._refresh_server_tools("amap-mcp", manager.config.servers["amap-mcp"], ToolsSession())
+    await manager.close()
+
+    assert manager.config.servers["amap-mcp"].tools == ["maps_geo", "maps_around_search"]
+
+
 def test_parse_mcp_result_accepts_dict_text_content() -> None:
     manager = MCPClientManager(build_config())
     result = SimpleNamespace(

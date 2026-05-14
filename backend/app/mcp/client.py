@@ -21,6 +21,7 @@ class MCPClientManager:
         self._exit_stacks: dict[str, AsyncExitStack] = {}
         self._sessions: dict[str, Any] = {}
         self._init_errors: dict[str, str] = {}
+        self._server_tools: dict[str, list[str]] = {}
 
     async def initialize(self, server_names: Iterable[str] | None = None) -> None:
         selected_servers = set(server_names) if server_names is not None else None
@@ -39,7 +40,13 @@ class MCPClientManager:
             await self._disconnect_server(server_name)
         self._sessions.clear()
         self._init_errors.clear()
+        self._server_tools.clear()
         logger.info("trip_generation[%s] MCP manager close finished", self.job_id)
+
+    def available_tools(self, server_name: str) -> list[str]:
+        server = self.config.servers.get(server_name)
+        configured_tools = server.tools if server else []
+        return self._server_tools.get(server_name) or configured_tools
 
     async def call(self, server_name: str, tool: str, params: dict[str, Any]) -> dict[str, Any]:
         server = self.config.servers.get(server_name)
@@ -176,6 +183,7 @@ class MCPClientManager:
                 timeout=server.timeout_seconds,
             )
             parsed = self._parse_mcp_result(result)
+            self._raise_for_mcp_result_error(server_name, tool, parsed)
             logger.info(
                 "trip_generation[%s] MCP tool call succeeded server=%s tool=%s elapsed=%.2fs result=%s",
                 self.job_id,
@@ -226,11 +234,43 @@ class MCPClientManager:
             await session.initialize()
             self._exit_stacks[server_name] = stack
             self._sessions[server_name] = session
+            await self._refresh_server_tools(server_name, server, session)
             logger.info("MCP server %s initialized", server_name)
         except BaseException:
             with suppress(Exception, asyncio.CancelledError):
                 await stack.aclose()
             raise
+
+    async def _refresh_server_tools(self, server_name: str, server: MCPServerConfig, session: Any) -> None:
+        try:
+            result = await session.list_tools()
+        except Exception as exc:
+            logger.warning(
+                "trip_generation[%s] MCP list_tools failed server=%s error=%s",
+                self.job_id,
+                server_name,
+                exc,
+            )
+            self._server_tools[server_name] = list(server.tools)
+            return
+
+        tools = getattr(result, "tools", None)
+        names = [
+            tool.name
+            for tool in tools or []
+            if isinstance(getattr(tool, "name", None), str)
+        ]
+        if names:
+            self._server_tools[server_name] = names
+            server.tools = names
+        else:
+            self._server_tools[server_name] = list(server.tools)
+        logger.info(
+            "trip_generation[%s] MCP server tools server=%s tools=%s",
+            self.job_id,
+            server_name,
+            ", ".join(self._server_tools[server_name]) or "-",
+        )
 
     def _format_init_error(self, server: MCPServerConfig, exc: Exception) -> str:
         command = " ".join([server.command or "", *server.args]).strip()
@@ -252,10 +292,36 @@ class MCPClientManager:
             return False
         non_retryable_fragments = (
             "unknown tool",
+            "tool not found",
+            "not found",
+            "mcp error -32602",
             "invalid arguments",
             "validation",
         )
         return not any(fragment in message for fragment in non_retryable_fragments)
+
+    def _raise_for_mcp_result_error(self, server_name: str, tool: str, parsed: Any) -> None:
+        if not isinstance(parsed, dict):
+            return
+
+        error_text = parsed.get("error") or parsed.get("detail")
+        text = parsed.get("text")
+        if error_text:
+            raise MCPToolError(f"{server_name}:{tool} returned error: {error_text}")
+        if not isinstance(text, str):
+            return
+
+        normalized = text.strip().lower()
+        error_fragments = (
+            "unknown tool",
+            "tool not found",
+            "mcp error",
+            "error:",
+            "failed:",
+            "not found.",
+        )
+        if any(fragment in normalized for fragment in error_fragments):
+            raise MCPToolError(f"{server_name}:{tool} returned error text: {text.strip()}")
 
     def _parse_mcp_result(self, result: Any) -> dict[str, Any]:
         if hasattr(result, "content"):

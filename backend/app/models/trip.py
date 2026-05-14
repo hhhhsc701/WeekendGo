@@ -154,7 +154,7 @@ class TripItem(BaseModel):
 
 
 class TripInput(BaseModel):
-    city: str = Field(min_length=1)
+    city: str | None = Field(default=None, min_length=1)
     date: date
     days: int = Field(default=1, ge=1, le=14)
     budget: float | None = Field(default=None, ge=0)
@@ -163,6 +163,17 @@ class TripInput(BaseModel):
     departure_city: str | None = None
     departure_coordinates: Coordinates | None = None
     notes: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_empty_city(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        for key in ("city", "departure_city", "notes"):
+            if isinstance(data.get(key), str) and not data[key].strip():
+                data[key] = None
+        return data
 
 
 class TripOutput(BaseModel):

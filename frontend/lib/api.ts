@@ -6,7 +6,7 @@
 import type { TripInput, TripOutput } from "@/types/trip";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
-const API_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS || 180000);
+const API_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS || 1800000);
 
 class ApiError extends Error {
   constructor(

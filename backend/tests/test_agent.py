@@ -284,9 +284,11 @@ class TestTripAgentCompleteFlow:
 
         assert isinstance(result, TripOutput)
         assert result.title == "北京周末一日游"
-        assert len(result.items) == 2
+        assert len(result.items) == 3
         assert result.items[0].activity == "故宫游览"
         assert result.items[0].place.name == "故宫博物院"
+        assert result.items[2].activity == "酒店入住/休息"
+        assert result.items[2].place.category == "酒店"
         assert fake_llm.call_count == 3
         assert fake_mcp.call_count == 2
 
@@ -358,10 +360,10 @@ class TestTripAgentCompleteFlow:
         ) in fake_mcp.calls
 
     @pytest.mark.asyncio
-    async def test_chinese_weather_does_not_fallback_to_weather_location_search(
+    async def test_chinese_weather_uses_local_coordinates_when_geocode_fails(
         self, trip_input: TripInput
     ) -> None:
-        """Chinese city weather resolution never calls weather.search_location."""
+        """Chinese city weather resolution uses local coordinates instead of weather.search_location."""
         fake_mcp = FakeMCP(
             tool_results={
                 "amap-mcp:geocode": {"error": "No geocode result"},
@@ -385,9 +387,11 @@ class TestTripAgentCompleteFlow:
         assert ("weather", "search_location") not in [
             (server_name, tool_name) for server_name, tool_name, _ in fake_mcp.calls
         ]
-        assert ("weather", "get_forecast") not in [
-            (server_name, tool_name) for server_name, tool_name, _ in fake_mcp.calls
-        ]
+        assert (
+            "weather",
+            "get_forecast",
+            {"latitude": 39.9042, "longitude": 116.4074, "days": 3},
+        ) in fake_mcp.calls
 
     @pytest.mark.asyncio
     async def test_weather_forecast_failure_continues_to_finish(
@@ -474,7 +478,9 @@ class TestTripAgentCompleteFlow:
         assert result.items[0].place.coordinates.lat == 39.9163
         assert result.items[0].estimated_cost == 60.0
         assert result.items[1].estimated_cost == 80.0
-        assert result.total_budget == 140.0
+        assert result.items[2].place.category == "酒店"
+        assert result.items[2].estimated_cost == 150.0
+        assert result.total_budget == 290.0
 
     @pytest.mark.asyncio
     async def test_train_result_enriches_transport_detail(
@@ -584,6 +590,46 @@ class TestTripAgentCompleteFlow:
         assert result.input.departure_coordinates is not None
         assert result.input.departure_coordinates.lng == 121.4737
         assert result.input.departure_coordinates.lat == 31.2304
+
+    @pytest.mark.asyncio
+    async def test_agent_supports_random_destination_when_city_missing(self, fake_mcp: FakeMCP) -> None:
+        """Missing city enters random destination mode and persists the selected city."""
+        trip_input = TripInput(
+            city=None,
+            date=date(2025, 5, 15),
+            days=2,
+            budget=1200.0,
+            interests=["美食", "Citywalk"],
+            companions=CompanionType.couple,
+            departure_city="上海",
+        )
+        random_output = {
+            "city": "杭州",
+            "title": "杭州2日随机周末游",
+            "items": [
+                {
+                    "start_time": "09:00",
+                    "end_time": "11:00",
+                    "activity": "西湖Citywalk",
+                    "place": {"name": "西湖"},
+                    "estimated_cost": 0.0,
+                }
+            ],
+        }
+        fake_llm = FakeLLM(
+            responses=[
+                {"tool_calls": [{"name": "geocode", "arguments": {"address": "杭州"}}]},
+                {"tool_calls": [{"name": "finish", "arguments": random_output}]},
+            ]
+        )
+
+        agent = TripAgent(llm_client=fake_llm, mcp_manager=fake_mcp, max_iterations=10)
+        result = await agent.run(trip_input)
+
+        assert isinstance(result, TripOutput)
+        assert result.input.city == "杭州"
+        assert result.title == "杭州2日随机周末游"
+        assert ("amap-mcp", "geocode", {"address": "杭州"}) in fake_mcp.calls
 
 
 class TestTripAgentFallback:

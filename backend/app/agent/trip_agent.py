@@ -8,7 +8,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from app.agent.city_coordinates import get_city_coordinates
+from app.agent.city_coordinates import CITY_COORDINATES, get_city_coordinates
 from app.agent.errors import AgentOutputError
 from app.agent.tools import SYSTEM_PROMPT, TOOL_DEFINITIONS
 from app.mcp.client import MCPClientManager
@@ -34,7 +34,10 @@ class TripAgent:
         self.job_id = job_id or "local"
 
     async def run(self, trip_input: TripInput) -> TripOutput:
-        self._region = self._detect_region(trip_input.city)
+        self._requested_city = self._normalize_destination_city(trip_input.city)
+        self._destination_city = self._requested_city
+        self._random_destination = self._destination_city is None
+        self._region = self._detect_region(self._destination_city or trip_input.departure_city)
         self._route = self._get_route()
         self._weather_summary: dict[str, Any] | None = None
         self._city_coordinates: dict[str, float] | None = None
@@ -42,6 +45,7 @@ class TripAgent:
         self._poi_places: list[dict[str, Any]] = []
         self._transport_options: list[dict[str, Any]] = []
         self._tool_errors: list[str] = []
+        self._failed_tool_results: dict[str, str] = {}
         logger.info(
             "trip_generation[%s] detected region=%s route_primary=%s route_shared=%s",
             self.job_id,
@@ -128,7 +132,9 @@ class TripAgent:
             f"Agent exceeded {self.max_iterations} iterations before finish",
         )
 
-    def _detect_region(self, city: str) -> str:
+    def _detect_region(self, city: str | None) -> str:
+        if not city:
+            return "domestic"
         if self._is_chinese(city):
             return "domestic"
         return "international"
@@ -145,10 +151,22 @@ class TripAgent:
 
     def _build_initial_messages(self, trip_input: TripInput) -> list[dict[str, Any]]:
         region_hint = "国内城市，使用高德地图" if self._region == "domestic" else "国际城市，使用Google Maps"
+        destination = self._destination_city or (
+            "未指定（随机目的地模式：请根据出发城市、日期、天数、预算、兴趣、同行和备注，"
+            "自主选择一个适合周末旅行的具体目的地城市）"
+        )
+        random_destination_instruction = ""
+        if self._random_destination:
+            random_destination_instruction = (
+                "\n随机目的地要求：先选择一个明确的目的地城市，并在第一次调用geocode、get_weather、"
+                "search_poi、query_trains以及最终finish.city中都使用该城市。"
+                "若未指定出发城市，优先选择中国国内周末游热门城市；若指定出发城市，优先选择交通便利、"
+                "符合天数和预算的周边或直达城市。"
+            )
 
         user_prompt = f"""请规划以下周末行程：
 
-城市：{trip_input.city}
+城市：{destination}
 日期：{trip_input.date.isoformat()}
 天数：{trip_input.days}
 预算：{trip_input.budget or '未指定'}
@@ -157,7 +175,7 @@ class TripAgent:
 出发城市：{trip_input.departure_city or '未指定'}
 
 区域判断：{region_hint}
-请自主收集数据并生成行程。"""
+请自主收集数据并生成行程。{random_destination_instruction}"""
 
         return [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -183,8 +201,18 @@ class TripAgent:
             tool_name,
             self._json_preview(params),
         )
+        failure_cache_key = self._tool_failure_cache_key(tool_name, params)
+        if failure_cache_key in self._failed_tool_results:
+            logger.info(
+                "trip_generation[%s] tool call skipped after previous failure tool=%s params=%s",
+                self.job_id,
+                tool_name,
+                self._json_preview(params),
+            )
+            return self._failed_tool_results[failure_cache_key]
         try:
             if tool_name == "geocode":
+                self._capture_destination_city(params.get("address") or params.get("city") or params.get("query"))
                 server_name = self._resolve_server_for_tool("geocode")
                 if not server_name:
                     return self._finish_tool_result(
@@ -200,14 +228,27 @@ class TripAgent:
                     )
 
                 api_tool = self._resolve_mcp_tool_name(server_name, "geocode")
+                params = self._prepare_mcp_params(server_name, api_tool, params)
                 self._log_mcp_call(tool_name, server_name, api_tool)
                 result = await self.mcp.call(server_name, api_tool, params)
                 coordinates = self._extract_coordinates(result)
                 if coordinates:
                     self._city_coordinates = coordinates
+                else:
+                    fallback_coordinates = get_city_coordinates(str(params.get("address") or ""))
+                    if fallback_coordinates:
+                        self._city_coordinates = {
+                            "latitude": fallback_coordinates["lat"],
+                            "longitude": fallback_coordinates["lng"],
+                        }
+                        result = {
+                            **result,
+                            "fallback_coordinates": self._coordinates_to_place_dict(self._city_coordinates),
+                        }
                 return self._finish_tool_result(tool_name, result, started_at)
 
             if tool_name == "search_poi":
+                self._capture_destination_city(params.get("city"))
                 server_name = self._resolve_server_for_tool("search_poi")
                 if not server_name:
                     return self._finish_tool_result(
@@ -216,13 +257,16 @@ class TripAgent:
                         started_at,
                     )
 
-                api_tool = self._resolve_mcp_tool_name(server_name, "search_poi")
+                api_tool = self._resolve_search_poi_tool(server_name, params)
+                params = self._prepare_mcp_params(server_name, api_tool, params)
                 self._log_mcp_call(tool_name, server_name, api_tool)
                 result = await self.mcp.call(server_name, api_tool, params)
+                result = await self._enrich_poi_search_result(server_name, result)
                 self._poi_places.extend(self._extract_poi_places(result))
                 return self._finish_tool_result(tool_name, result, started_at)
 
             if tool_name == "get_weather":
+                self._capture_destination_city(params.get("city") or params.get("query") or params.get("location"))
                 result = await self._execute_weather_tool(params)
                 weather_summary = self._extract_weather_summary(result)
                 if weather_summary:
@@ -230,6 +274,7 @@ class TripAgent:
                 return self._finish_tool_result(tool_name, result, started_at)
 
             if tool_name == "query_trains":
+                self._capture_destination_city(params.get("to") or params.get("toStation"))
                 if self._region != "domestic":
                     return self._finish_tool_result(
                         tool_name,
@@ -245,8 +290,10 @@ class TripAgent:
                         started_at,
                     )
 
-                self._log_mcp_call(tool_name, server_name, "query_trains")
-                result = await self.mcp.call(server_name, "query_trains", params)
+                api_tool = self._resolve_mcp_tool_name(server_name, "query_trains")
+                train_params = self._prepare_mcp_params(server_name, api_tool, params)
+                self._log_mcp_call(tool_name, server_name, api_tool)
+                result = await self.mcp.call(server_name, api_tool, train_params)
                 self._transport_options.extend(self._extract_transport_options(result, "train"))
                 return self._finish_tool_result(tool_name, result, started_at)
 
@@ -266,7 +313,12 @@ class TripAgent:
             )
             error = f"{tool_name}: {exc}"
             self._tool_errors.append(error)
-            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+            result = json.dumps({"error": str(exc)}, ensure_ascii=False)
+            self._failed_tool_results[failure_cache_key] = result
+            return result
+
+    def _tool_failure_cache_key(self, tool_name: str, params: dict[str, Any]) -> str:
+        return f"{tool_name}:{json.dumps(params, ensure_ascii=False, sort_keys=True, default=str)}"
 
     def _finish_tool_result(self, tool_name: str, result: dict[str, Any], started_at: float) -> str:
         logger.info(
@@ -316,41 +368,102 @@ class TripAgent:
         return f" {' '.join(parts)}" if parts else ""
 
     def _resolve_server_for_tool(self, tool_name: str) -> str | None:
-        servers = self.mcp.config.servers
         route = self._route
 
         candidates = [route.primary] + route.shared
 
         for server_name in candidates:
-            server = servers.get(server_name)
+            server = self.mcp.config.servers.get(server_name)
             if not server or not server.enabled:
                 continue
 
-            if self._resolve_mcp_tool_name(server_name, tool_name) in server.tools:
+            if self._resolve_mcp_tool_name(server_name, tool_name) in self._available_tools(server_name):
                 return server_name
 
         return None
 
-    def _resolve_mcp_tool_name(self, server_name: str, logical_tool_name: str) -> str:
+    def _available_tools(self, server_name: str) -> list[str]:
+        if hasattr(self.mcp, "available_tools"):
+            return self.mcp.available_tools(server_name)
         server = self.mcp.config.servers.get(server_name)
-        if not server:
-            return logical_tool_name
+        return server.tools if server else []
+
+    def _resolve_mcp_tool_name(self, server_name: str, logical_tool_name: str) -> str:
+        available_tools = self._available_tools(server_name)
 
         aliases = {
-            "geocode": ["geocode", "maps_geo", "maps_geocode"],
+            "geocode": ["maps_geo", "geocode", "maps_geocode"],
             "search_poi": [
-                "search_poi",
-                "search_poi_around",
+                "maps_around_search",
+                "maps_text_search",
                 "maps_search_nearby",
+                "search_poi_around",
+                "search_poi",
                 "place/nearbysearch",
             ],
             "get_weather": ["get_forecast", "get_weather"],
-            "query_trains": ["query_trains"],
+            "query_trains": ["get-tickets", "query_trains"],
         }
         for candidate in aliases.get(logical_tool_name, [logical_tool_name]):
-            if candidate in server.tools:
+            if candidate in available_tools:
                 return candidate
         return logical_tool_name
+
+    def _resolve_search_poi_tool(self, server_name: str, params: dict[str, Any]) -> str:
+        available_tools = self._available_tools(server_name)
+        if server_name == "amap-mcp":
+            if (params.get("location") or self._city_coordinates) and "maps_around_search" in available_tools:
+                return "maps_around_search"
+            if "maps_text_search" in available_tools:
+                return "maps_text_search"
+        return self._resolve_mcp_tool_name(server_name, "search_poi")
+
+    def _prepare_mcp_params(
+        self,
+        server_name: str,
+        api_tool: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        if server_name == "amap-mcp" and api_tool == "maps_geo":
+            prepared = {"address": params.get("address") or params.get("city") or params.get("query")}
+            if params.get("city"):
+                prepared["city"] = params["city"]
+            return {key: value for key, value in prepared.items() if value not in (None, "")}
+
+        if server_name == "amap-mcp" and api_tool in {"maps_around_search", "maps_text_search"}:
+            query = params.get("query") or params.get("keywords") or params.get("keyword")
+            prepared: dict[str, Any] = {}
+            if api_tool == "maps_around_search":
+                location = params.get("location")
+                if not location and self._city_coordinates:
+                    location = (
+                        f"{self._city_coordinates['longitude']},"
+                        f"{self._city_coordinates['latitude']}"
+                    )
+                prepared["location"] = location
+                prepared["radius"] = str(params.get("radius") or 3000)
+                if query:
+                    prepared["keywords"] = query
+            else:
+                if query:
+                    prepared["keywords"] = query
+                city = params.get("city")
+                if city:
+                    prepared["city"] = city
+            return {key: value for key, value in prepared.items() if value not in (None, "")}
+
+        if server_name == "train-12306" and api_tool == "get-tickets":
+            return {
+                "date": params.get("date"),
+                "fromStation": params.get("from") or params.get("fromStation"),
+                "toStation": params.get("to") or params.get("toStation"),
+                "trainFilterFlags": params.get("trainFilterFlags") or "",
+                "sortFlag": params.get("sortFlag") or "startTime",
+                "limitedNum": int(params.get("limitedNum") or 5),
+                "format": "json",
+            }
+
+        return params
 
     async def _execute_weather_tool(self, params: dict[str, Any]) -> dict[str, Any]:
         server_name = self._resolve_server_for_tool("get_weather")
@@ -370,21 +483,30 @@ class TripAgent:
             if not city:
                 return {"error": "Weather query requires city or coordinates"}
 
-            logger.info(
-                "trip_generation[%s] resolving weather location city=%s via server=%s",
-                self.job_id,
-                city,
-                server_name,
-            )
-            location_result = await self._resolve_weather_location(str(city), server_name)
-            coordinates = self._extract_coordinates(location_result)
-            if coordinates is None:
-                return {
-                    "error": "Failed to resolve weather location coordinates",
-                    "location_result": location_result,
+            fallback_coordinates = get_city_coordinates(str(city))
+            if fallback_coordinates:
+                latitude = fallback_coordinates["lat"]
+                longitude = fallback_coordinates["lng"]
+                self._city_coordinates = {
+                    "latitude": fallback_coordinates["lat"],
+                    "longitude": fallback_coordinates["lng"],
                 }
-            latitude = coordinates["latitude"]
-            longitude = coordinates["longitude"]
+            else:
+                logger.info(
+                    "trip_generation[%s] resolving weather location city=%s via server=%s",
+                    self.job_id,
+                    city,
+                    server_name,
+                )
+                location_result = await self._resolve_weather_location(str(city), server_name)
+                coordinates = self._extract_coordinates(location_result)
+                if coordinates is None:
+                    return {
+                        "error": "Failed to resolve weather location coordinates",
+                        "location_result": location_result,
+                    }
+                latitude = coordinates["latitude"]
+                longitude = coordinates["longitude"]
 
         forecast_params = {
             "latitude": float(latitude),
@@ -408,6 +530,12 @@ class TripAgent:
             parts = [part.strip() for part in result["location"].split(",")]
             if len(parts) >= 2:
                 longitude, latitude = parts[0], parts[1]
+        if (latitude is None or longitude is None) and isinstance(result.get("return"), list):
+            for item in result["return"]:
+                if isinstance(item, dict):
+                    coordinates = self._extract_coordinates(item)
+                    if coordinates:
+                        return coordinates
         if (latitude is None or longitude is None) and isinstance(result.get("geocodes"), list):
             for geocode in result["geocodes"]:
                 if isinstance(geocode, dict):
@@ -438,6 +566,38 @@ class TripAgent:
 
         return None
 
+    async def _enrich_poi_search_result(self, server_name: str, result: Any) -> Any:
+        if server_name != "amap-mcp" or not isinstance(result, dict):
+            return result
+        if "maps_search_detail" not in self._available_tools(server_name):
+            return result
+
+        pois = result.get("pois")
+        if not isinstance(pois, list):
+            return result
+
+        enriched_pois: list[Any] = []
+        for poi in pois[:8]:
+            if not isinstance(poi, dict) or poi.get("location") or not poi.get("id"):
+                enriched_pois.append(poi)
+                continue
+            try:
+                detail = await self.mcp.call(server_name, "maps_search_detail", {"id": poi["id"]})
+                if isinstance(detail, dict):
+                    enriched_pois.append({**poi, **detail})
+                else:
+                    enriched_pois.append(poi)
+            except Exception as exc:
+                logger.info(
+                    "trip_generation[%s] POI detail enrichment skipped id=%s error=%s",
+                    self.job_id,
+                    poi.get("id"),
+                    exc,
+                )
+                enriched_pois.append(poi)
+        result["pois"] = [*enriched_pois, *pois[8:]]
+        return result
+
     async def _resolve_weather_location(self, city: str, weather_server_name: str) -> dict[str, Any]:
         if self._is_chinese(city):
             geocode_server_name = self._resolve_server_for_tool("geocode")
@@ -467,11 +627,80 @@ class TripAgent:
             {"query": city, "limit": 1},
         )
 
-    def _is_chinese(self, text: str) -> bool:
+    def _is_chinese(self, text: str | None) -> bool:
+        if not text:
+            return False
         for char in text:
             if "\u4e00" <= char <= "\u9fff":
                 return True
         return False
+
+    def _normalize_destination_city(self, city: Any) -> str | None:
+        if not isinstance(city, str):
+            return None
+        normalized = city.strip()
+        if re.fullmatch(r"-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?", normalized):
+            return None
+        return normalized or None
+
+    def _capture_destination_city(self, city: Any) -> None:
+        normalized = self._normalize_destination_city(city)
+        if not normalized:
+            return
+        self._destination_city = normalized
+        if self._is_chinese(normalized):
+            self._region = "domestic"
+        elif not self._is_chinese(normalized):
+            self._region = "international"
+
+    def _capture_destination_city_from_finish(self, data: dict[str, Any]) -> None:
+        candidates = [
+            data.get("city"),
+            data.get("destination_city"),
+            data.get("destination"),
+        ]
+        input_data = data.get("input")
+        if isinstance(input_data, dict):
+            candidates.append(input_data.get("city"))
+        for candidate in candidates:
+            before = self._destination_city
+            self._capture_destination_city(candidate)
+            if self._destination_city != before:
+                return
+
+        if not self._destination_city and isinstance(data.get("title"), str):
+            self._capture_destination_city(self._infer_city_from_text(data["title"]))
+
+    def _infer_city_from_text(self, text: str) -> str | None:
+        normalized = text.strip()
+        for city in CITY_COORDINATES:
+            if city in normalized:
+                return city
+        return None
+
+    def _resolved_destination_city(self, trip_input: TripInput) -> str:
+        return (
+            self._destination_city
+            or self._normalize_destination_city(trip_input.city)
+            or self._infer_city_from_text(trip_input.notes or "")
+            or self._fallback_destination_city(trip_input)
+        )
+
+    def _fallback_destination_city(self, trip_input: TripInput) -> str:
+        interest_text = " ".join(trip_input.interests)
+        if any(keyword in interest_text for keyword in ("自然", "风光", "摄影", "海", "度假")):
+            return "厦门"
+        if any(keyword in interest_text for keyword in ("历史", "博物馆", "古迹")):
+            return "南京"
+        if any(keyword in interest_text for keyword in ("美食", "夜生活", "Citywalk", "citywalk")):
+            return "成都"
+        if trip_input.departure_city:
+            departure = trip_input.departure_city.strip()
+            if departure in {"上海", "杭州", "苏州", "南京"}:
+                return "杭州" if departure != "杭州" else "苏州"
+            if departure in {"北京", "天津"}:
+                return "天津" if departure != "天津" else "北京"
+        return "杭州"
 
     async def _prepare_departure_coordinates(self, trip_input: TripInput) -> None:
         if not trip_input.departure_city:
@@ -554,6 +783,7 @@ class TripAgent:
 
     def _trip_input_dump(self, trip_input: TripInput) -> dict[str, Any]:
         data = trip_input.model_dump(mode="json")
+        data["city"] = self._resolved_destination_city(trip_input)
         if self._departure_coordinates and not data.get("departure_coordinates"):
             data["departure_coordinates"] = self._coordinates_to_place_dict(self._departure_coordinates)
         return data
@@ -568,6 +798,7 @@ class TripAgent:
         try:
             logger.info("trip_generation[%s] parsing model finish output", self.job_id)
             data = json.loads(arguments)
+            self._capture_destination_city_from_finish(data)
             data["input"] = self._trip_input_dump(trip_input)
             data["region"] = self._region
             self._enrich_finish_data(data, trip_input)
@@ -609,14 +840,126 @@ class TripAgent:
             if item.get("estimated_cost") in (None, ""):
                 item["estimated_cost"] = self._estimate_item_cost(item, trip_input)
 
-        if data.get("total_budget") in (None, ""):
-            total = sum(
-                float(item["estimated_cost"])
-                for item in items
-                if isinstance(item, dict) and item.get("estimated_cost") not in (None, "")
+        self._ensure_hotel_item(items, trip_input)
+        self._sync_total_budget(data, items)
+
+    def _sync_total_budget(self, data: dict[str, Any], items: list[Any]) -> None:
+        total = sum(
+            float(item["estimated_cost"])
+            for item in items
+            if isinstance(item, dict) and item.get("estimated_cost") not in (None, "")
+        )
+        if total <= 0:
+            return
+
+        existing = data.get("total_budget")
+        try:
+            existing_total = float(existing) if existing not in (None, "") else None
+        except (TypeError, ValueError):
+            existing_total = None
+        if existing_total is None or existing_total < total:
+            data["total_budget"] = round(total, 2)
+
+    def _ensure_hotel_item(self, items: list[Any], trip_input: TripInput) -> None:
+        if self._has_hotel_item(items):
+            return
+
+        hotel_place = self._select_hotel_place(trip_input)
+        hotel_cost = self._estimate_hotel_cost(trip_input)
+        hotel_date = trip_input.date
+        items.append(
+            {
+                "start_time": f"{hotel_date.isoformat()} 20:30",
+                "end_time": f"{hotel_date.isoformat()} 21:00",
+                "activity": "酒店入住/休息",
+                "place": hotel_place,
+                "estimated_cost": hotel_cost,
+                "transport": "前往酒店",
+                "notes": "模型未返回酒店安排，系统已补充住宿节点；请出发前核对房型、余量和价格。",
+            }
+        )
+
+    def _has_hotel_item(self, items: list[Any]) -> bool:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            text = " ".join(
+                str(value)
+                for value in (
+                    item.get("activity"),
+                    item.get("transport"),
+                    item.get("notes"),
+                    self._place_name(item.get("place")),
+                    self._place_category(item.get("place")),
+                )
+                if value
             )
-            if total > 0:
-                data["total_budget"] = round(total, 2)
+            if self._is_hotel_text(text):
+                return True
+        return False
+
+    def _select_hotel_place(self, trip_input: TripInput) -> dict[str, Any]:
+        destination_city = self._resolved_destination_city(trip_input)
+        for poi in self._poi_places:
+            text = " ".join(
+                str(value)
+                for value in (poi.get("name"), poi.get("category"), poi.get("address"))
+                if value
+            )
+            if self._is_hotel_text(text):
+                return {
+                    "name": str(poi.get("name") or f"{destination_city}推荐酒店"),
+                    "address": poi.get("address"),
+                    "coordinates": poi.get("coordinates"),
+                    "rating": poi.get("rating"),
+                    "category": "酒店",
+                }
+
+        coordinates = self._city_coordinates
+        if not coordinates:
+            fallback = get_city_coordinates(destination_city)
+            if fallback:
+                coordinates = {"latitude": fallback["lat"], "longitude": fallback["lng"]}
+
+        place: dict[str, Any] = {
+            "name": f"{destination_city}推荐酒店",
+            "address": f"{destination_city}核心商圈附近",
+            "category": "酒店",
+        }
+        if coordinates:
+            place["coordinates"] = {
+                "lat": coordinates["latitude"],
+                "lng": coordinates["longitude"],
+            }
+        return place
+
+    def _estimate_hotel_cost(self, trip_input: TripInput) -> float:
+        if trip_input.budget:
+            return round(min(max(trip_input.budget * 0.3 / max(trip_input.days, 1), 150), 800), 2)
+        if trip_input.companions.value == "family":
+            return 450.0
+        if trip_input.companions.value in ("couple", "friends"):
+            return 350.0
+        return 250.0
+
+    def _is_hotel_text(self, value: str) -> bool:
+        normalized = value.lower()
+        return any(
+            keyword in normalized
+            for keyword in (
+                "酒店",
+                "宾馆",
+                "住宿",
+                "入住",
+                "退房",
+                "民宿",
+                "客栈",
+                "hotel",
+                "hostel",
+                "inn",
+                "resort",
+            )
+        )
 
     def _enrich_item_place(self, item: dict[str, Any], index: int) -> None:
         place = item.get("place")
@@ -670,7 +1013,7 @@ class TripAgent:
                         "lng": coordinates["longitude"],
                     },
                     "rating": candidate.get("rating"),
-                    "category": candidate.get("type") or candidate.get("category"),
+                    "category": candidate.get("type") or candidate.get("category") or candidate.get("typecode"),
                 }
             )
         return places
@@ -728,6 +1071,12 @@ class TripAgent:
             return place
         return None
 
+    def _place_category(self, place: Any) -> str | None:
+        if isinstance(place, dict):
+            category = place.get("category")
+            return str(category) if category else None
+        return None
+
     def _enrich_item_transport(self, item: dict[str, Any]) -> None:
         detail = item.get("transport_detail")
         if isinstance(detail, dict):
@@ -762,16 +1111,19 @@ class TripAgent:
 
     def _extract_transport_options(
         self,
-        result: dict[str, Any],
+        result: Any,
         mode: str,
     ) -> list[dict[str, Any]]:
         candidates: list[Any] = []
-        for key in ("trains", "train", "results", "items", "data", "list"):
-            value = result.get(key)
-            if isinstance(value, list):
-                candidates.extend(value)
-        if not candidates and isinstance(result.get("result"), list):
-            candidates.extend(result["result"])
+        if isinstance(result, list):
+            candidates.extend(result)
+        elif isinstance(result, dict):
+            for key in ("trains", "train", "results", "items", "data", "list"):
+                value = result.get(key)
+                if isinstance(value, list):
+                    candidates.extend(value)
+            if not candidates and isinstance(result.get("result"), list):
+                candidates.extend(result["result"])
 
         options: list[dict[str, Any]] = []
         for candidate in candidates:
@@ -788,6 +1140,8 @@ class TripAgent:
             "code",
             normalized.get("train_number")
             or normalized.get("train_no")
+            or normalized.get("start_train_code")
+            or normalized.get("station_train_code")
             or normalized.get("flight_number")
             or normalized.get("flight_no")
             or normalized.get("number")
@@ -798,6 +1152,7 @@ class TripAgent:
             "departure",
             normalized.get("from")
             or normalized.get("from_station")
+            or normalized.get("from_station_name")
             or normalized.get("departure_station")
             or normalized.get("departure_airport")
             or normalized.get("出发站"),
@@ -805,6 +1160,8 @@ class TripAgent:
         normalized.setdefault(
             "arrival",
             normalized.get("to")
+            or normalized.get("to_station")
+            or normalized.get("to_station_name")
             or normalized.get("to_station")
             or normalized.get("arrival_station")
             or normalized.get("arrival_airport")
@@ -828,6 +1185,7 @@ class TripAgent:
             "departure_time",
             normalized.get("depart_time")
             or normalized.get("start_time")
+            or normalized.get("startTime")
             or normalized.get("departureTime")
             or normalized.get("出发时间"),
         )
@@ -838,7 +1196,14 @@ class TripAgent:
             or normalized.get("arrivalTime")
             or normalized.get("到达时间"),
         )
-        normalized.setdefault("cost", normalized.get("price") or normalized.get("fare") or normalized.get("费用"))
+        normalized.setdefault("duration", normalized.get("lishi") or normalized.get("历时"))
+        normalized.setdefault(
+            "cost",
+            normalized.get("price")
+            or normalized.get("fare")
+            or normalized.get("费用")
+            or self._extract_ticket_price(normalized.get("prices")),
+        )
         cost = normalized.get("cost")
         if isinstance(cost, str):
             match = re.search(r"\d+(?:\.\d+)?", cost)
@@ -860,6 +1225,22 @@ class TripAgent:
             if normalized.get(key) not in (None, "")
         }
 
+    def _extract_ticket_price(self, prices: Any) -> float | None:
+        if not isinstance(prices, list):
+            return None
+        for price in prices:
+            if not isinstance(price, dict):
+                continue
+            value = price.get("price") or price.get("amount") or price.get("value")
+            if value in (None, ""):
+                continue
+            if isinstance(value, (int, float)):
+                return float(value)
+            match = re.search(r"\d+(?:\.\d+)?", str(value))
+            if match:
+                return float(match.group(0))
+        return None
+
     def _infer_transport_detail(self, transport_text: str) -> dict[str, Any] | None:
         code_match = re.search(r"\b([GDCZTK]\d{1,4}|[A-Z]{2}\d{3,4})\b", transport_text, re.IGNORECASE)
         if not code_match:
@@ -880,38 +1261,39 @@ class TripAgent:
 
     def _build_fallback_output(self, trip_input: TripInput, reason: str) -> TripOutput:
         logger.warning("Falling back to deterministic trip output: %s", reason)
+        destination_city = self._resolved_destination_city(trip_input)
         daily_items = [
             {
                 "start_time": "09:30",
                 "end_time": "12:00",
-                "activity": f"{trip_input.city}核心景点游览",
-                "place": {"name": f"{trip_input.city}核心景区"},
+                "activity": f"{destination_city}核心景点游览",
+                "place": {"name": f"{destination_city}核心景区"},
                 "notes": "外部数据不可用时生成的保守安排，建议出发前核对开放时间。",
             },
             {
                 "start_time": "12:00",
                 "end_time": "14:00",
                 "activity": "本地特色午餐",
-                "place": {"name": f"{trip_input.city}本地餐馆"},
+                "place": {"name": f"{destination_city}本地餐馆"},
             },
             {
                 "start_time": "14:00",
                 "end_time": "17:30",
                 "activity": f"围绕{', '.join(trip_input.interests)}的城市探索",
-                "place": {"name": f"{trip_input.city}城市街区"},
+                "place": {"name": f"{destination_city}城市街区"},
             },
             {
                 "start_time": "18:00",
                 "end_time": "20:00",
                 "activity": "晚餐与夜间散步",
-                "place": {"name": f"{trip_input.city}夜间休闲区"},
+                "place": {"name": f"{destination_city}夜间休闲区"},
             },
         ]
         items = daily_items * trip_input.days
 
         return TripOutput.model_validate(
             {
-                "title": f"{trip_input.city}{trip_input.days}日周末游（数据受限）",
+                "title": f"{destination_city}{trip_input.days}日周末游（数据受限）",
                 "input": self._trip_input_dump(trip_input),
                 "region": self._region,
                 "items": items,

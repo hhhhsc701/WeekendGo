@@ -14,9 +14,18 @@ mcp:
       env:
         AMAP_MAPS_API_KEY: ${AMAP_API_KEY}
       tools:
-        - geocode
-        - search_poi_around
-        - driving_route_planning
+        - maps_geo
+        - maps_regeocode
+        - maps_around_search
+        - maps_text_search
+        - maps_search_detail
+        - maps_weather
+        - maps_bicycling
+        - maps_direction_driving
+        - maps_direction_walking
+        - maps_direction_transit_integrated
+        - maps_distance
+        - maps_ip_location
 
     google-maps-mcp:
       enabled: true
@@ -66,7 +75,14 @@ mcp:
         - 12306-mcp
       env: {}
       tools:
-        - query_trains
+        - get-current-date
+        - get-tickets
+        - get-interline-tickets
+        - get-station-code-of-citys
+        - get-stations-code-in-city
+        - get-station-code-by-names
+        - get-station-by-telecode
+        - get-train-route-stations
 
   # 默认路由配置
   routes:

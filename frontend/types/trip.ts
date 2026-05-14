@@ -47,7 +47,7 @@ export interface TripItem {
 }
 
 export interface TripInput {
-  city: string;
+  city?: string | null;
   date: string; // ISO date string (YYYY-MM-DD)
   days: number;
   budget?: number | null;

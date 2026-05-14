@@ -64,7 +64,18 @@ function escapeHtml(value: string): string {
     .replaceAll("'", "&#039;");
 }
 
-function toMapPoint(place: Place): { latLng: [number, number]; place: Place } | null {
+interface MapPoint {
+  index: number;
+  latLng: [number, number];
+  place: Place;
+}
+
+interface MarkerPoint {
+  latLng: [number, number];
+  points: MapPoint[];
+}
+
+function toMapPoint(place: Place, index: number): MapPoint | null {
   const coordinates = place.coordinates;
   if (
     !isFiniteNumber(coordinates?.lat) ||
@@ -74,14 +85,49 @@ function toMapPoint(place: Place): { latLng: [number, number]; place: Place } | 
   }
 
   const { lat, lng } = coordinates;
-  return { latLng: gcj02ToWgs84(lat, lng), place };
+  return { index, latLng: gcj02ToWgs84(lat, lng), place };
+}
+
+function angleBetweenPoints(from: L.Point, to: L.Point): number {
+  return (Math.atan2(to.y - from.y, to.x - from.x) * 180) / Math.PI;
+}
+
+function isHotelPlace(place: Place): boolean {
+  const text = `${place.name} ${place.category || ""}`.toLowerCase();
+  return text.includes("酒店") || text.includes("住宿") || text.includes("hotel");
+}
+
+function isTransportPlace(place: Place): boolean {
+  return place.category === "departure" || place.category === "transport";
+}
+
+function groupMarkerPoints(points: MapPoint[]): MarkerPoint[] {
+  const grouped = new Map<string, MarkerPoint>();
+
+  points.forEach((point) => {
+    const key = `${point.latLng[0].toFixed(6)},${point.latLng[1].toFixed(6)}`;
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.points.push(point);
+    } else {
+      grouped.set(key, { latLng: point.latLng, points: [point] });
+    }
+  });
+
+  return Array.from(grouped.values());
 }
 
 function MapInner({ places, className }: MapViewProps) {
+  const [showRoute, setShowRoute] = useState(true);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markersRef = useRef<L.Layer[]>([]);
-  const mapPoints = useMemo(() => places.map(toMapPoint).filter((point) => point !== null), [places]);
+  const routeLayerRef = useRef<L.Layer | null>(null);
+  const mapPoints = useMemo(
+    () => places.map((place, index) => toMapPoint(place, index)).filter((point) => point !== null),
+    [places]
+  );
+  const markerPoints = useMemo(() => groupMarkerPoints(mapPoints), [mapPoints]);
 
   useEffect(() => {
     let cancelled = false;
@@ -105,6 +151,8 @@ function MapInner({ places, className }: MapViewProps) {
 
     return () => {
       cancelled = true;
+      routeLayerRef.current?.remove();
+      routeLayerRef.current = null;
       markersRef.current.forEach((marker) => marker.remove());
       markersRef.current = [];
       mapRef.current?.remove();
@@ -119,6 +167,8 @@ function MapInner({ places, className }: MapViewProps) {
       if (cancelled || !mapRef.current) return;
 
       const map = mapRef.current;
+      routeLayerRef.current?.remove();
+      routeLayerRef.current = null;
       markersRef.current.forEach((marker) => marker.remove());
       markersRef.current = [];
 
@@ -128,20 +178,63 @@ function MapInner({ places, className }: MapViewProps) {
       }
 
       const bounds: L.LatLngExpression[] = [];
-      markersRef.current = mapPoints.map(({ latLng, place }) => {
+      if (showRoute && mapPoints.length > 1) {
+        const routeGroup = L.layerGroup();
+        L.polyline(
+          mapPoints.map(({ latLng }) => latLng),
+          {
+            color: "#2563eb",
+            weight: 3,
+            opacity: 0.72,
+            dashArray: "8 8",
+            lineCap: "round",
+            lineJoin: "round",
+          }
+        ).addTo(routeGroup);
+
+        for (let index = 0; index < mapPoints.length - 1; index += 1) {
+          const from = L.latLng(mapPoints[index].latLng);
+          const to = L.latLng(mapPoints[index + 1].latLng);
+          const fromPoint = map.latLngToLayerPoint(from);
+          const toPoint = map.latLngToLayerPoint(to);
+          const middle = L.latLng((from.lat + to.lat) / 2, (from.lng + to.lng) / 2);
+          const angle = angleBetweenPoints(fromPoint, toPoint);
+
+          L.marker(middle, {
+            interactive: false,
+            icon: L.divIcon({
+              className: "",
+              html: `<div style="transform: rotate(${angle}deg); color: #2563eb; font-size: 18px; line-height: 18px; text-shadow: 0 1px 2px rgba(255,255,255,0.95);">➤</div>`,
+              iconSize: [18, 18],
+              iconAnchor: [9, 9],
+            }),
+          }).addTo(routeGroup);
+        }
+
+        routeGroup.addTo(map);
+        routeLayerRef.current = routeGroup;
+      }
+
+      markersRef.current = markerPoints.map(({ latLng, points }) => {
         bounds.push(latLng);
-        const address = place.address ? `<br/><small>${escapeHtml(place.address)}</small>` : "";
-        const isTransportPoint = place.category === "departure" || place.category === "transport";
-        const color = isTransportPoint ? "#dc2626" : "#2563eb";
-        const fillColor = isTransportPoint ? "#ef4444" : "#3b82f6";
+        const hasHotel = points.some(({ place }) => isHotelPlace(place));
+        const hasTransportPoint = points.some(({ place }) => isTransportPlace(place));
+        const color = hasHotel ? "#047857" : hasTransportPoint ? "#dc2626" : "#2563eb";
+        const fillColor = hasHotel ? "#10b981" : hasTransportPoint ? "#ef4444" : "#3b82f6";
+        const popup = points
+          .map(({ index, place }) => {
+            const address = place.address ? `<br/><small>${escapeHtml(place.address)}</small>` : "";
+            return `<div><strong>${index + 1}. ${escapeHtml(place.name)}</strong>${address}</div>`;
+          })
+          .join('<div style="height: 6px"></div>');
         return L.circleMarker(latLng, {
-          radius: isTransportPoint ? 8 : 7,
+          radius: hasHotel || hasTransportPoint ? 8 : 7,
           color,
           weight: 2,
           fillColor,
           fillOpacity: 0.85,
         })
-          .bindPopup(`<strong>${escapeHtml(place.name)}</strong>${address}`)
+          .bindPopup(popup)
           .addTo(map);
       });
 
@@ -155,13 +248,23 @@ function MapInner({ places, className }: MapViewProps) {
     return () => {
       cancelled = true;
     };
-  }, [mapPoints]);
+  }, [mapPoints, markerPoints, showRoute]);
 
   return (
-    <div
-      ref={containerRef}
-      className={`w-full h-[400px] rounded-lg border border-border overflow-hidden ${className || ""}`}
-    />
+    <div className={`relative h-[400px] w-full rounded-lg border border-border overflow-hidden ${className || ""}`}>
+      <div ref={containerRef} className="h-full w-full" />
+      {mapPoints.length > 1 && (
+        <label className="absolute right-3 top-3 z-[1000] inline-flex items-center gap-2 rounded-md border border-border bg-background/95 px-3 py-2 text-xs font-medium text-foreground shadow-sm">
+          <input
+            type="checkbox"
+            checked={showRoute}
+            onChange={(event) => setShowRoute(event.target.checked)}
+            className="h-4 w-4 accent-primary"
+          />
+          路线连线
+        </label>
+      )}
+    </div>
   );
 }
 
@@ -176,7 +279,7 @@ export function MapView({ places, className }: MapViewProps) {
   if (!mounted) {
     return (
       <div
-        className={`w-full h-[400px] rounded-lg border border-border bg-muted/20 flex items-center justify-center ${className || ""}`}
+        className={`h-[400px] w-full rounded-lg border border-border bg-muted/20 flex items-center justify-center ${className || ""}`}
       >
         <div className="text-muted text-sm">地图加载中...</div>
       </div>
@@ -186,7 +289,7 @@ export function MapView({ places, className }: MapViewProps) {
   if (placesWithCoords.length === 0) {
     return (
       <div
-        className={`w-full h-[200px] rounded-lg border border-border bg-muted/20 flex items-center justify-center ${className || ""}`}
+        className={`h-[200px] w-full rounded-lg border border-border bg-muted/20 flex items-center justify-center ${className || ""}`}
       >
         <div className="text-muted text-sm">暂无地点坐标数据</div>
       </div>

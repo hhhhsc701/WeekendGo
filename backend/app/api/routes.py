@@ -42,14 +42,16 @@ def build_llm_client(settings: Settings) -> AsyncOpenAI:
     )
 
 
-def detect_region(city: str) -> str:
+def detect_region(city: str | None) -> str:
+    if not city:
+        return "domestic"
     if any("\u4e00" <= char <= "\u9fff" for char in city):
         return "domestic"
     return "international"
 
 
 def resolve_required_servers(config: MCPConfig, trip_input: TripInput) -> set[str]:
-    region = detect_region(trip_input.city)
+    region = detect_region(trip_input.city or trip_input.departure_city)
     route = config.routes.get(region) or config.routes.get("domestic")
     if route is None:
         return set()
@@ -69,7 +71,9 @@ def resolve_required_servers(config: MCPConfig, trip_input: TripInput) -> set[st
             and "get_weather" not in primary_tools
             and "get_forecast" not in primary_tools
         )
-        needs_trains = "query_trains" in server_tools and bool(trip_input.departure_city)
+        needs_trains = bool(
+            {"query_trains", "get-tickets"} & server_tools
+        ) and bool(trip_input.departure_city)
         if needs_weather or needs_trains:
             required.add(server_name)
 
@@ -84,13 +88,14 @@ async def generate_trip(
 ) -> TripOutput:
     job_id = uuid.uuid4().hex[:8]
     logger.info(
-        "trip_generation[%s] request received city=%s date=%s days=%s interests=%s departure_city=%s",
+        "trip_generation[%s] request received city=%s date=%s days=%s interests=%s departure_city=%s random_destination=%s",
         job_id,
-        trip_input.city,
+        trip_input.city or "-",
         trip_input.date.isoformat(),
         trip_input.days,
         ",".join(trip_input.interests),
         trip_input.departure_city or "-",
+        not bool(trip_input.city),
     )
     mcp_config = load_mcp_config(settings.mcp_config_path)
     mcp_manager = MCPClientManager(mcp_config, job_id=job_id)

@@ -21,24 +21,25 @@ def parse_args() -> argparse.Namespace:
 
 
 async def verify(args: argparse.Namespace) -> dict[str, Any]:
-    config = load_mcp_config(Path(args.config), enabled_servers={args.server}, strict_env=True)
+    config = load_mcp_config(Path(args.config))
     manager = MCPClientManager(config)
-    await manager.initialize()
+    await manager.initialize({args.server})
     try:
-        if args.server not in manager.available_servers:
-            raise RuntimeError(f"MCP server {args.server} did not initialize")
+        tools = sorted(manager.available_tools(args.server))
+        if not tools:
+            raise RuntimeError(f"MCP server {args.server} did not initialize or exposed no tools")
 
         result: dict[str, Any] = {
             "server": args.server,
-            "availableServers": manager.available_servers,
-            "tools": sorted(manager.tool_registry.get(args.server, set())),
+            "tools": tools,
         }
         if args.tool:
             params = json.loads(args.params_json)
-            call_result = await manager.call(args.region, args.tool, params)
+            call_result = await manager.call(args.server, args.tool, params)
             result["call"] = {
                 "tool": args.tool,
                 "ok": True,
+                "preview": call_result,
                 "resultType": type(call_result).__name__,
             }
         return result

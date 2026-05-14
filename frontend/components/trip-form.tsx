@@ -85,10 +85,6 @@ export function TripForm({ onSubmit }: TripFormProps) {
   const validate = (): boolean => {
     const newErrors: Record<string, string> = {};
     
-    if (!city.trim()) {
-      newErrors.city = "请输入目的地城市";
-    }
-    
     if (!date) {
       newErrors.date = "请选择出发日期";
     }
@@ -114,7 +110,7 @@ export function TripForm({ onSubmit }: TripFormProps) {
     setErrors({});
 
     const input: TripInput = {
-      city: city.trim(),
+      city: city.trim() || null,
       date,
       days,
       budget: budget ? parseFloat(budget) : null,
@@ -138,11 +134,11 @@ export function TripForm({ onSubmit }: TripFormProps) {
       <div className="space-y-1.5">
         <label className="flex items-center gap-1.5 text-sm font-medium text-foreground">
           <MapPin className="w-4 h-4 text-primary" />
-          目的地城市
+          目的地城市（可选）
         </label>
         <Input
           type="text"
-          placeholder="例如：杭州、成都、大理..."
+          placeholder="不填则根据偏好随机推荐"
           value={city}
           onChange={(e) => setCity(e.target.value)}
           className={errors.city ? "border-red-500 focus-visible:ring-red-500" : ""}
